@@ -1,0 +1,40 @@
+# Secrets & Environment Variables (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python Virtual Environments & Bytecode
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Local TestGen Checkpoints, Manifests & Reports
+.testgen_state.json
+.testgen_state.json.tmp
+scan_output.json
+batch_report.json
+*.log
+
+# .NET & Test Results
+bin/
+obj/
+TestResults/
+coverage.*
+*.user
+*.suo
+.vs/
+
+# IDE & OS Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
