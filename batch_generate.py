@@ -20,11 +20,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-from testgen.agent_loop import TestGenLoop
-from testgen.author import AllKeysRateLimitedError, AuthorAgent
-from testgen.context import ContextBuilder
-from testgen.logger import get_current_log_file, get_logger, setup_logger
-from testgen.state import StateTracker
+try:
+    from testgen.agent_loop import TestGenLoop
+    from testgen.author import AllKeysRateLimitedError, AuthorAgent
+    from testgen.context import ContextBuilder
+    from testgen.logger import get_current_log_file, get_logger, setup_logger
+    from testgen.state import StateTracker
+except KeyboardInterrupt:
+    print("\n\n[STOPPED] Execution cancelled by user (Ctrl+C). Exiting cleanly.")
+    sys.exit(130)
 
 # ──────────────────────────────────────────────────────────────────────
 # Skip-list heuristics -- files that contain no meaningful testable logic
@@ -283,6 +287,7 @@ def main():
     all_batch_skipped: List[Dict[str, str]] = []
     start_total = time.time()
     rate_limit_interrupted = False
+    keyboard_interrupted = False
 
     for project in projects_to_run:
         project_name = project["project_name"]
@@ -382,17 +387,24 @@ def main():
                             pool.submit(process_single_file, loop, name): name
                             for name in pending_files
                         }
-                        for i, future in enumerate(as_completed(future_to_file), 1):
-                            file_name = future_to_file[future]
+                        try:
+                            for i, future in enumerate(as_completed(future_to_file), 1):
+                                file_name = future_to_file[future]
+                                try:
+                                    result = future.result()
+                                    state_tracker.record_file_result(project_name, file_name, result)
+                                    all_batch_results.append(result)
+                                    status = result.get("status", "???")
+                                    cov = result.get("coverage_pct", 0)
+                                    logger.info(f"[{i}/{len(pending_files)}] {file_name}: {status} ({cov:.1f}%)")
+                                except AllKeysRateLimitedError:
+                                    raise
+                        except KeyboardInterrupt:
                             try:
-                                result = future.result()
-                                state_tracker.record_file_result(project_name, file_name, result)
-                                all_batch_results.append(result)
-                                status = result.get("status", "???")
-                                cov = result.get("coverage_pct", 0)
-                                logger.info(f"[{i}/{len(pending_files)}] {file_name}: {status} ({cov:.1f}%)")
-                            except AllKeysRateLimitedError:
-                                raise
+                                pool.shutdown(wait=False, cancel_futures=True)
+                            except Exception:
+                                pass
+                            raise
         except AllKeysRateLimitedError:
             rate_limit_interrupted = True
             logger.warning("\n" + "!" * 70)
@@ -401,8 +413,22 @@ def main():
             logger.warning(" Re-run this script anytime later to automatically resume from where it left off!")
             logger.warning("!" * 70 + "\n")
             break
+        except KeyboardInterrupt:
+            keyboard_interrupted = True
+            logger.warning("\n" + "!" * 70)
+            logger.warning(" [STOPPED BY USER] Batch execution cancelled via Ctrl+C (KeyboardInterrupt).")
+            logger.warning(f" Progress up to the last completed file has been saved to '{args.state_file}'.")
+            logger.warning(" Re-run this script anytime to automatically resume from where it left off!")
+            logger.warning("!" * 70 + "\n")
+            break
 
     elapsed = time.time() - start_total
+
+    # ── Ensure State is Flushed ──
+    try:
+        state_tracker.save()
+    except Exception:
+        pass
 
     # ── Report ──
     print_report(all_batch_results, all_batch_skipped, elapsed)
@@ -410,7 +436,13 @@ def main():
 
     if rate_limit_interrupted:
         logger.info(f"[INFO] Batch run paused due to API quota. Resume later with: python batch_generate.py")
+    elif keyboard_interrupted:
+        logger.info(f"[INFO] Batch run halted by user. Resume anytime with: python batch_generate.py")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n[STOPPED] Execution interrupted by user (Ctrl+C). Exiting cleanly.")
+        sys.exit(130)

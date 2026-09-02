@@ -13,10 +13,14 @@ import json
 import sys
 from pathlib import Path
 
-from testgen.agent_loop import TestGenLoop
-from testgen.author import AllKeysRateLimitedError
-from testgen.context import ContextBuilder
-from testgen.logger import get_current_log_file, get_logger, setup_logger
+try:
+    from testgen.agent_loop import TestGenLoop
+    from testgen.author import AllKeysRateLimitedError
+    from testgen.context import ContextBuilder
+    from testgen.logger import get_current_log_file, get_logger, setup_logger
+except KeyboardInterrupt:
+    print("\n\n[STOPPED] Execution cancelled by user (Ctrl+C). Exiting cleanly.")
+    sys.exit(130)
 
 
 def find_project(manifest: dict, project_hint: str = None) -> dict:
@@ -97,10 +101,18 @@ def main():
         logger.info(f"Progress has been logged to: {get_current_log_file()}")
         logger.info("Run again later to resume!")
         sys.exit(0)
+    except KeyboardInterrupt:
+        logger.warning("\n[STOPPED] Test generation interrupted by user (Ctrl+C).")
+        logger.info(f"Log file written to: {get_current_log_file()}")
+        sys.exit(130)
     except Exception as e:
         logger.error(f"\n[FATAL ERROR] Unexpected exception: {e}", exc_info=True)
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n[STOPPED] Execution interrupted by user (Ctrl+C). Exiting cleanly.")
+        sys.exit(130)
