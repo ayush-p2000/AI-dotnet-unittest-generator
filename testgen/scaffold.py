@@ -165,7 +165,12 @@ def ensure_no_package_downgrade_warnings(test_csproj: Path) -> None:
         test_csproj.write_text(new_text, encoding="utf-8")
 
 
-def scaffold_test_project(root: str, csproj_path: str, project_name: str) -> Path:
+def scaffold_test_project(
+    root: str,
+    csproj_path: str,
+    project_name: str,
+    verify_build: bool = True,
+) -> Path:
     logger = get_logger()
     root_path = Path(root).resolve()
     main_csproj = Path(csproj_path).resolve()
@@ -230,13 +235,16 @@ def scaffold_test_project(root: str, csproj_path: str, project_name: str) -> Pat
     except RuntimeError:
         pass
 
-    # 5. Clean corrupted obj/bin in main project to avoid duplicate attribute errors (Bug 6 fix)
-    clean_obj_bin(main_csproj.parent)
+    if verify_build:
+        # Clean corrupted obj/bin in main project to avoid duplicate attribute errors.
+        # This is intentionally limited to the explicit scaffold workflow: the
+        # critic immediately builds/tests during generation, and deleting build
+        # artifacts for every single-file request can race with active tooling.
+        clean_obj_bin(main_csproj.parent)
 
-    # 6. Verify that the test project builds successfully
-    logger.info("\n--- Verifying test project build ---")
-    run(["dotnet", "build", str(test_csproj)])
-    logger.info("Test project built successfully!\n")
+        logger.info("\n--- Verifying test project build ---")
+        run(["dotnet", "build", str(test_csproj)])
+        logger.info("Test project built successfully!\n")
 
     return test_csproj
 
