@@ -34,7 +34,7 @@ Before you start, make sure you have:
 | Requirement | How to check | Install link |
 |---|---|---|
 | **.NET 8 SDK** | `dotnet --version` (>= 8.0) | [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/8.0) |
-| **Python 3.14+** | `python --version` (>= 3.14) | [python.org](https://www.python.org/downloads/) |
+| **Python 3.10+** | `python --version` (>= 3.10) | [python.org](https://www.python.org/downloads/) |
 | **Gemini API Key** | N/A | [Google AI Studio](https://aistudio.google.com/apikey) |
 
 ---
@@ -437,9 +437,6 @@ No arguments. Checks that the Gemini API key in `.env` is valid.
 
 ## 📁 Project Structure
 
-For the extensible package layout and guidance on where to add features, see
-[FOLDER_STRUCTURE.md](FOLDER_STRUCTURE.md).
-
 ```
 nemotron-csharp-testgen/
 |-- .env                      # API keys (git-ignored)
@@ -453,13 +450,15 @@ nemotron-csharp-testgen/
 |-- generate_tests.py         # Step 4a: Single-file test generation
 |-- batch_generate.py         # Step 4b: Batch test generation
 |
-|-- testgen/                  # Extensible application package
-|   |-- cli/                  # Command implementations
-|   |-- agents/               # Gemini author and dotnet coverage critic
-|   |-- application/          # Loop orchestration, context, checkpoint state
-|   |-- project/              # C# scanning and test-project scaffolding
-|   |-- infrastructure/       # Shared services (logging today)
-|   `-- <legacy shims>        # Existing testgen.* imports remain supported
+|-- testgen/                  # Core engine package
+|   |-- __init__.py
+|   |-- scanner.py            # C# AST parser (regex-based)
+|   |-- scaffold.py           # Test project scaffolder
+|   |-- context.py            # Dependency context builder
+|   |-- author.py             # Gemini-powered test author agent
+|   |-- critic.py             # dotnet test runner & coverage parser
+|   |-- agent_loop.py         # Author<->Critic iterative loop
+|   |-- state.py              # Checkpoint state persistence
 |
 |-- walkthrough.md            # Detailed technical walkthrough
 |-- README.md                 # This file

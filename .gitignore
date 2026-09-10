@@ -6,8 +6,7 @@
 *.key
 
 # Python Virtual Environments & Bytecode
-# Covers the default environment and local version-specific environments (e.g. .venv312/).
-.venv*/
+.venv/
 venv/
 env/
 ENV/

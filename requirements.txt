@@ -1,5 +1,2 @@
-# Python 3.14+ compatible SDK stack. Pydantic 2.12.5 resolves to
-# pydantic-core 2.41.5, which ships CPython 3.14 Windows wheels.
-openai>=2.16.0,<4
-pydantic==2.12.5
-python-dotenv>=1.0.0,<2
+openai>=1.0.0
+python-dotenv>=1.0.0
