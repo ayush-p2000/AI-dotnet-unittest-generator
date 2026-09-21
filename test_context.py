@@ -17,7 +17,7 @@ if __name__ == "__main__":
     print(f"Usings: {context['usings']}")
     print(f"Types in File: {[t['name'] for t in context['types']]}")
     print(f"Resolved Dependencies Count: {len(context['resolved_dependencies'])}")
-    print("\n--- Formatted Dependencies Context for Gemini ---")
+    print("\n--- Formatted Dependencies Context for AI Agent ---")
     print(context["formatted_dependencies_context"])
     print("\n--- Source Code Sample (first 10 lines) ---")
     print("\n".join(context["source_code"].splitlines()[:10]))

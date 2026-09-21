@@ -36,7 +36,8 @@ def main():
     parser.add_argument("--no-tests", action="store_true", help="Verify with 'dotnet build' only, skip 'dotnet test'")
     parser.add_argument("--resume", action="store_true", help="Skip already resolved issues in state file")
     parser.add_argument("--max-retries", type=int, default=3, help="Max self-healing attempts per method (default: 3)")
-    parser.add_argument("--model", default="gemini-3.6-flash", help="Gemini model for refactoring agent")
+    parser.add_argument("--provider", default="auto", choices=["auto", "ollama", "gemini", "qwen-cloud"], help="AI provider agent (default: auto)")
+    parser.add_argument("--model", default=None, help="AI model name (default: auto-detected based on provider)")
 
     args = parser.parse_args()
 
@@ -91,7 +92,7 @@ def main():
     # 3. Setup agents and matcher
     state_tracker = SonarStateTracker()
     matcher = IssueMatcher(target_path)
-    refactor_agent = RefactorAgent(model_name=args.model)
+    refactor_agent = RefactorAgent(model_name=args.model, provider=args.provider)
     verifier_agent = VerifierAgent(target_path)
     loop = SonarRefactorLoop(
         matcher=matcher,

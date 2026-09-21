@@ -1,6 +1,6 @@
 # AI-Powered C# Unit Test Generator & Refactoring Studio (.NET 8)
 
-A production-grade, project-agnostic autonomous unit test generation and code-refactoring platform for any .NET 8 C# project. Powered by a **2-Agent Loop** (Author Agent + Critic Agent) using the **Google Gemini API** to generate high-coverage unit tests with **xUnit**, **Moq**, and **FluentAssertions**, alongside an integrated **Web UI Dashboard** and **SonarQube Cognitive Complexity Refactoring Agent**.
+A production-grade, project-agnostic autonomous unit test generation and code-refactoring platform for any .NET 8 C# project. Powered by a **2-Agent Loop** (Author Agent + Critic Agent) with multi-agent support for **Local Ollama (Qwen 3 Coder)** and **Google Gemini** to generate high-coverage unit tests with **xUnit**, **Moq**, and **FluentAssertions**, alongside an integrated **Web UI Dashboard** and **SonarQube Cognitive Complexity Refactoring Agent**.
 
 ---
 
@@ -13,28 +13,21 @@ A production-grade, project-agnostic autonomous unit test generation and code-re
    - [Option A: Modern Web Dashboard (Recommended)](#option-a-modern-web-dashboard-recommended)
    - [Option B: Command Line Interface (CLI)](#option-b-command-line-interface-cli)
 5. [Autonomous Test Generation Workflow](#-autonomous-test-generation-workflow)
-   - [Step 1: Scan the Target Project](#step-1-scan-the-target-project)
-   - [Step 2: Automated Scaffolding & Solution Isolation](#step-2-automated-scaffolding--solution-isolation)
-   - [Step 3: Single-File or Solution-Wide Batch Generation](#step-3-single-file-or-solution-wide-batch-generation)
-   - [Step 4: Self-Healing Critic Loop & Full TRX Stack Traces](#step-4-self-healing-critic-loop--full-trx-stack-traces)
-6. [SonarQube Cognitive Complexity & Auto-Refactoring](#-sonarqube-cognitive-complexity--auto-refactoring)
-7. [Resilient Multi-Key & Multi-Model Quota Handling](#-resilient-multi-key--multi-model-quota-handling)
-8. [Checkpointing & Zero-Cost Resume](#-checkpointing--zero-cost-resume)
-9. [CLI Reference](#-cli-reference)
-10. [Architecture & How It Works](#-architecture--how-it-works)
-11. [Project Structure](#-project-structure)
-12. [Troubleshooting](#-troubleshooting)
+6. [Multi-Agent Selection: Qwen 3 Coder vs Gemini](#-multi-agent-selection)
+7. [SonarQube Cognitive Complexity & Auto-Refactoring](#-sonarqube-cognitive-complexity--auto-refactoring)
+8. [CLI Reference](#-cli-reference)
+9. [Architecture & How It Works](#-architecture--how-it-works)
+10. [Troubleshooting](#-troubleshooting)
 
 ---
 
 ## 🚀 Key Capabilities
 
+- **Multi-Agent Provider Choice**: Switch seamlessly between **Local Ollama (Qwen 3 Coder)** for zero-cost, private offline generation and **Google Gemini** (`gemini-3.6-flash`, `gemini-3.5-flash-lite`, `gemini-2.5-pro`) with automated multi-key quota failover.
 - **100% Autonomous Batch Execution**: Point at any C# project or multi-project solution. It auto-scaffolds the test project, resolves dependencies, and generates, builds, tests, and refines unit tests across all testable files without manual intervention.
-- **Web UI Dashboard**: Modern, dark-mode browser interface (`http://localhost:5000`) with project selector, real-time log streaming via Server-Sent Events (SSE), batch generation triggers, and SonarQube refactoring workbench.
+- **Web UI Dashboard**: Modern, dark-mode browser interface (`http://localhost:5000`) with agent dropdown selector, dynamic model discovery, project selector, real-time log streaming via Server-Sent Events (SSE), and SonarQube refactoring workbench.
 - **Full, Untruncated Stack Traces (TRX Integration)**: Integrates directly with Visual Studio Test Results (`.trx`) XML to feed the complete, untruncated runtime stack traces and compiler error codes back to the Author Agent for accurate self-correction.
 - **ASP.NET Core & Universal .NET 8 Support**: Automatic detection of `Microsoft.NET.Sdk.Web` / ASP.NET Core, automatically configuring `<FrameworkReference Include="Microsoft.AspNetCore.App" />`, `DefaultHttpContext`, `TempDataDictionary`, and `Moq`/`FluentAssertions` setup.
-- **Multi-Model Quota Fallback**: Seamlessly rotates across multiple Gemini API keys and automatically falls back to secondary models (`gemini-3.5-flash-lite`, `gemini-2.5-flash`) on independent quotas when primary model limits are reached.
-- **Transient 503 Demand Spike Handling**: Automatically catches Google API `503 Service Unavailable` demand spikes with exponential backoff and client rotation rather than failing files.
 - **SonarQube Complexity Refactoring**: Analyzes functions exceeding cognitive complexity thresholds, generates refactored clean code, validates build integrity, and creates automatic backups before applying changes.
 
 ---
@@ -45,7 +38,8 @@ A production-grade, project-agnostic autonomous unit test generation and code-re
 |---|---|---|
 | **.NET 8 SDK** | `dotnet --version` (>= 8.0) | [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/8.0) |
 | **Python 3.10+** | `python --version` (>= 3.10) | [python.org](https://www.python.org/downloads/) |
-| **Gemini API Key** | Defined in `.env` | [Google AI Studio](https://aistudio.google.com/apikey) |
+| **Ollama (Qwen 3 Coder)** | `ollama run qwen3-coder:latest` | [ollama.com](https://ollama.com/) |
+| **Gemini API Key (Optional)** | Defined in `.env` | [Google AI Studio](https://aistudio.google.com/apikey) |
 | **SonarQube / SonarCloud (Optional)** | URL & Token | [sonarqube.org](https://www.sonarqube.org/) |
 
 ---
@@ -72,20 +66,21 @@ source .venv/bin/activate
 ### 3. Install Dependencies
 ```bash
 pip install -r requirements.txt
-# Or manually:
-pip install openai python-dotenv requests
 ```
 
-### 4. Configure API Keys (`.env`)
-Create a `.env` file in the project root:
+### 4. Configure AI Agents (`.env`)
+Create or edit your `.env` file:
 ```env
-# Primary key
-GEMINI_API_KEY=your_primary_api_key_here
+# Default Provider: "ollama" or "gemini"
+AI_PROVIDER=ollama
 
-# Additional fallback keys for automatic failover
+# --- Option A: Local Ollama (Qwen 3 Coder) ---
+OLLAMA_BASE_URL=http://localhost:11434/v1
+OLLAMA_MODEL=qwen3-coder:latest
+
+# --- Option B: Google Gemini API ---
+GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_API_KEY_2=your_second_key_here
-GEMINI_API_KEY_3=your_third_key_here
-GEMINI_API_KEY_4=your_fourth_key_here
 ```
 
 ---
@@ -262,7 +257,8 @@ python batch_generate.py [options]
   --manifest PATH       Path to scan manifest (default: scan_output.json)
   --project NAME        Target a specific project in multi-project solutions
   --all-projects        Process all projects in the solution sequentially
-  --model MODEL         Gemini model (default: gemini-3.6-flash)
+  --provider PROVIDER   AI provider: auto, ollama, gemini, qwen-cloud (default: auto)
+  --model MODEL         Model name (default: auto-detected for selected provider)
   --coverage FLOAT      Target code coverage percentage (default: 90.0)
   --retries INT         Max Author/Critic repair iterations per file (default: 4)
   --concurrency INT     Parallel workers (default: 1)
@@ -278,7 +274,8 @@ python generate_tests.py <FileName.cs> [options]
 
   --manifest PATH       Path to scan manifest (default: scan_output.json)
   --project NAME        Target project name
-  --model MODEL         Gemini model (default: gemini-3.6-flash)
+  --provider PROVIDER   AI provider: auto, ollama, gemini, qwen-cloud (default: auto)
+  --model MODEL         Model name (default: auto-detected for selected provider)
   --coverage FLOAT      Target code coverage percentage (default: 90.0)
   --retries INT         Max iterations (default: 4)
 ```
@@ -322,12 +319,11 @@ python run_ui.py [--port 5000]
                          v                                          v
       +-------------------------------------+    +-------------------------------------+
       |            AUTHOR AGENT             |    |            CRITIC AGENT             |
-      | - Google Gemini LLM                 |    | - Executes dotnet test with TRX     |
-      | - Multi-Key failover (Key 1..N)     |    | - Extracts full, untruncated stack  |
-      | - Backup Model Fallback             |    |   traces & compiler error codes     |
-      |   (3.6-flash -> 3.5-lite -> 2.5-pro)|    | - Calculates line coverage via      |
-      | - 503 Spike Backoff & Retry         |    |   Cobertura XML                     |
-      | - Generates xUnit + Moq tests       |    |                                     |
+      | - Local Ollama (Qwen 3 Coder)       |    | - Executes dotnet test with TRX     |
+      |   OR Google Gemini (AI Studio)      |    | - Extracts full, untruncated stack  |
+      |   OR Qwen Cloud (DashScope)         |    |   traces & compiler error codes     |
+      | - Multi-Key failover for cloud keys |    | - Calculates line coverage via      |
+      | - Generates xUnit + Moq tests       |    |   Cobertura XML                     |
       +------------------+------------------+    +------------------+------------------+
                          |                                          ^
                          |--------- Writes test file -------------->|

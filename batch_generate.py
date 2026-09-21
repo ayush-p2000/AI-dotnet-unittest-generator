@@ -250,7 +250,8 @@ def main():
     parser.add_argument("--manifest", default="scan_output.json", help="Path to scan manifest JSON")
     parser.add_argument("--project", default=None, help="Project name (for multi-project solutions)")
     parser.add_argument("--all-projects", action="store_true", help="Process all projects in the solution sequentially")
-    parser.add_argument("--model", default="gemini-3.6-flash", help="Gemini model name")
+    parser.add_argument("--provider", default="auto", choices=["auto", "ollama", "gemini", "qwen-cloud"], help="AI provider agent (default: auto)")
+    parser.add_argument("--model", default=None, help="Model name (default: auto-detected based on provider)")
     parser.add_argument("--coverage", type=float, default=90.0, help="Target coverage %%")
     parser.add_argument("--retries", type=int, default=4, help="Max author/critic iterations per file")
     parser.add_argument("--concurrency", type=int, default=1, help="Parallel workers (use 1 for sequential)")
@@ -282,7 +283,7 @@ def main():
     root = Path(manifest["root"]).resolve()
     context_builder = ContextBuilder(manifest)
     state_tracker = StateTracker(state_file=args.state_file)
-    shared_author = AuthorAgent(model_name=args.model)
+    shared_author = AuthorAgent(model_name=args.model, provider=args.provider)
 
     all_batch_results: List[Dict[str, Any]] = []
     all_batch_skipped: List[Dict[str, str]] = []
@@ -409,7 +410,7 @@ def main():
         except AllKeysRateLimitedError:
             rate_limit_interrupted = True
             logger.warning("\n" + "!" * 70)
-            logger.warning(" [RATE LIMIT EXHAUSTED] All Gemini API keys have hit their daily quota limit.")
+            logger.warning(f" [RATE LIMIT EXHAUSTED] All {shared_author.provider.upper()} API keys have hit their daily quota limit.")
             logger.warning(f" Progress has been saved to '{args.state_file}'.")
             logger.warning(" Re-run this script anytime later to automatically resume from where it left off!")
             logger.warning("!" * 70 + "\n")

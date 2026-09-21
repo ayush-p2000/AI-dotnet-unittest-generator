@@ -46,12 +46,15 @@ document.addEventListener("DOMContentLoaded", () => {
   const singleModeForm = document.getElementById("singleModeForm");
   const batchModeForm = document.getElementById("batchModeForm");
   const singleFileSelect = document.getElementById("singleFileSelect");
+  const providerSelect = document.getElementById("providerSelect");
   const modelSelect = document.getElementById("modelSelect");
   const coverageSlider = document.getElementById("coverageSlider");
   const coverageVal = document.getElementById("coverageVal");
   const retriesInput = document.getElementById("retriesInput");
   const btnRunSingleTestGen = document.getElementById("btnRunSingleTestGen");
   const batchProjectSelect = document.getElementById("batchProjectSelect");
+  const batchProviderSelect = document.getElementById("batchProviderSelect");
+  const batchModelSelect = document.getElementById("batchModelSelect");
   const concurrencySelect = document.getElementById("concurrencySelect");
   const batchResumeCheck = document.getElementById("batchResumeCheck");
   const batchForceCheck = document.getElementById("batchForceCheck");
@@ -139,10 +142,65 @@ document.addEventListener("DOMContentLoaded", () => {
   startLogPolling();
 
   // ==========================================================================
+  // Provider & Model Dynamic Loading
+  // ==========================================================================
+  let providerData = null;
+
+  function populateModelsForSelect(selectEl, providerKey) {
+    if (!selectEl) return;
+    selectEl.innerHTML = "";
+    if (!providerData || !providerData.providers || !providerData.providers[providerKey]) {
+      const opt = document.createElement("option");
+      opt.value = providerKey === "gemini" ? "gemini-3.6-flash" : "qwen3-coder:latest";
+      opt.textContent = opt.value;
+      selectEl.appendChild(opt);
+      return;
+    }
+    const info = providerData.providers[providerKey];
+    info.models.forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = m;
+      selectEl.appendChild(opt);
+    });
+    if (info.default_model) {
+      selectEl.value = info.default_model;
+    }
+  }
+
+  if (providerSelect) {
+    providerSelect.addEventListener("change", () => {
+      populateModelsForSelect(modelSelect, providerSelect.value);
+    });
+  }
+
+  if (batchProviderSelect) {
+    batchProviderSelect.addEventListener("change", () => {
+      populateModelsForSelect(batchModelSelect, batchProviderSelect.value);
+    });
+  }
+
+  // ==========================================================================
   // Initial Page Load: Check Defaults & Scan Manifest
   // ==========================================================================
   async function init() {
     try {
+      // 0. Fetch AI Providers and Models
+      try {
+        const provRes = await fetch("/api/providers/models");
+        if (provRes.ok) {
+          providerData = await provRes.json();
+          if (providerData.default_provider) {
+            if (providerSelect) providerSelect.value = providerData.default_provider;
+            if (batchProviderSelect) batchProviderSelect.value = providerData.default_provider;
+          }
+          if (providerSelect) populateModelsForSelect(modelSelect, providerSelect.value);
+          if (batchProviderSelect) populateModelsForSelect(batchModelSelect, batchProviderSelect.value);
+        }
+      } catch (err) {
+        console.warn("Could not load AI providers", err);
+      }
+
       // 1. Fetch server config defaults (.env)
       const cfgRes = await fetch("/api/config");
       if (cfgRes.ok) {
@@ -386,7 +444,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const payload = {
       file_name: targetFile,
-      model: modelSelect.value,
+      provider: providerSelect ? providerSelect.value : "ollama",
+      model: modelSelect ? modelSelect.value : "qwen3-coder:latest",
       coverage: parseFloat(coverageSlider.value),
       retries: parseInt(retriesInput.value, 10),
     };
@@ -427,7 +486,8 @@ document.addEventListener("DOMContentLoaded", () => {
       force: batchForceCheck.checked,
       coverage: parseFloat(coverageSlider.value),
       retries: parseInt(retriesInput.value, 10),
-      model: modelSelect.value,
+      provider: batchProviderSelect ? batchProviderSelect.value : "ollama",
+      model: batchModelSelect ? batchModelSelect.value : "qwen3-coder:latest",
     };
 
     btnRunBatchTestGen.disabled = true;

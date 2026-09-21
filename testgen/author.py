@@ -1,7 +1,7 @@
 import os
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -10,15 +10,13 @@ from testgen.logger import get_logger
 load_dotenv()
 
 
-def get_gemini_api_keys() -> list[str]:
+def get_gemini_api_keys() -> List[str]:
     """Finds all GEMINI_API_KEY* defined in environment or .env."""
     keys = []
-    # Check primary key
     main_k = os.environ.get("GEMINI_API_KEY")
     if main_k and main_k not in keys:
         keys.append(main_k)
 
-    # Check additional numbered or named keys
     for k, v in os.environ.items():
         if k.startswith("GEMINI_API_KEY_") and v and v not in keys:
             keys.append(v)
@@ -26,6 +24,43 @@ def get_gemini_api_keys() -> list[str]:
     if not keys:
         raise ValueError("No GEMINI_API_KEY or GEMINI_API_KEY_* found in .env")
     return keys
+
+
+def get_qwen_api_keys() -> List[str]:
+    """Finds all QWEN_API_KEY* or DASHSCOPE_API_KEY defined in environment or .env."""
+    keys = []
+    main_k = os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
+    if main_k and main_k not in keys:
+        keys.append(main_k)
+
+    for k, v in os.environ.items():
+        if (k.startswith("QWEN_API_KEY_") or k.startswith("DASHSCOPE_API_KEY_")) and v and v not in keys:
+            keys.append(v)
+
+    if not keys:
+        raise ValueError("No QWEN_API_KEY or DASHSCOPE_API_KEY found in .env for Qwen Cloud")
+    return keys
+
+
+def resolve_provider(provider: Optional[str] = None, model_name: Optional[str] = None) -> str:
+    """
+    Determines whether to use 'ollama' (Local Qwen 3 Coder), 'gemini', or 'qwen-cloud'.
+    """
+    if provider and provider.lower() not in ["auto", ""]:
+        return provider.lower()
+
+    if model_name:
+        m = model_name.lower()
+        if m.startswith("gemini"):
+            return "gemini"
+        if m.startswith("qwen") or "coder" in m:
+            # If QWEN_API_KEY is present and OLLAMA_BASE_URL not set, could be cloud,
+            # but user has local Ollama installed, so default to ollama unless specified.
+            if os.environ.get("AI_PROVIDER") == "qwen-cloud":
+                return "qwen-cloud"
+            return "ollama"
+
+    return os.environ.get("AI_PROVIDER", "ollama").lower()
 
 
 def extract_csharp_code(text: str) -> str:
@@ -37,28 +72,58 @@ def extract_csharp_code(text: str) -> str:
 
 
 class AllKeysRateLimitedError(Exception):
-    """Raised when all available Gemini API keys have exhausted their rate limit."""
+    """Raised when all available API keys have exhausted their rate limit."""
     pass
 
 
 class AuthorAgent:
-    def __init__(self, model_name: str = "gemini-3.6-flash"):
+    """
+    Multi-Provider Unit Test Author Agent.
+    Supports:
+      - 'ollama': Local Qwen 3 Coder (http://localhost:11434/v1)
+      - 'gemini': Google Gemini API with multi-key failover rotation
+      - 'qwen-cloud': Alibaba Cloud DashScope / OpenRouter OpenAI-compatible endpoint
+    """
+
+    def __init__(
+        self,
+        model_name: Optional[str] = None,
+        provider: Optional[str] = None,
+    ):
         self.logger = get_logger()
-        self.api_keys = get_gemini_api_keys()
-        self.clients = [
-            OpenAI(
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                api_key=k,
-            )
-            for k in self.api_keys
-        ]
+        self.provider = resolve_provider(provider=provider, model_name=model_name)
+
+        if self.provider == "ollama":
+            self.base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+            self.model_name = model_name or os.environ.get("OLLAMA_MODEL", "qwen3-coder:latest")
+            api_key = os.environ.get("OLLAMA_API_KEY", "ollama")
+            self.api_keys = [api_key]
+            self.clients = [OpenAI(base_url=self.base_url, api_key=api_key)]
+            self.fallback_models = []
+            self.logger.info(f"[INFO] AuthorAgent initialized with Ollama (Model: {self.model_name}, Endpoint: {self.base_url}).")
+
+        elif self.provider == "qwen-cloud":
+            self.base_url = os.environ.get("QWEN_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+            self.model_name = model_name or "qwen3-coder-plus"
+            self.api_keys = get_qwen_api_keys()
+            self.clients = [OpenAI(base_url=self.base_url, api_key=k) for k in self.api_keys]
+            self.fallback_models = ["qwen3-coder-next"]
+            self.logger.info(f"[INFO] AuthorAgent initialized with Qwen Cloud ({len(self.clients)} key(s), Model: {self.model_name}).")
+
+        else:  # "gemini"
+            self.provider = "gemini"
+            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+            self.model_name = model_name or "gemini-3.6-flash"
+            self.api_keys = get_gemini_api_keys()
+            self.clients = [OpenAI(base_url=self.base_url, api_key=k) for k in self.api_keys]
+            self.fallback_models = ["gemini-3.5-flash-lite", "gemini-2.5-flash"]
+            self.logger.info(f"[INFO] AuthorAgent initialized with Gemini ({len(self.clients)} key(s), Model: {self.model_name}).")
+
         self.current_client_idx = 0
-        self.model_name = model_name
-        self.logger.info(f"[INFO] AuthorAgent initialized with {len(self.clients)} API key(s) (Model: {model_name}).")
 
     def _rotate_client(self) -> OpenAI:
         self.current_client_idx = (self.current_client_idx + 1) % len(self.clients)
-        self.logger.info(f"   [KEY ROTATION] Switched to Gemini API Key #{self.current_client_idx + 1}")
+        self.logger.info(f"   [KEY ROTATION] Switched to {self.provider.upper()} API Key #{self.current_client_idx + 1}")
         return self.clients[self.current_client_idx]
 
     def generate_tests(
@@ -68,7 +133,7 @@ class AuthorAgent:
         previous_code: Optional[str] = None,
     ) -> str:
         """
-        Generates or refines unit test code for the target C# file using Gemini.
+        Generates or refines unit test code for the target C# file using the configured AI agent.
         Works generically for any .NET 8 C# project.
         """
         file_name = context["file_name"]
@@ -137,10 +202,39 @@ class AuthorAgent:
 
         user_prompt = "\n".join(user_content_parts)
 
-        # Try available API keys with fallback models if rate limits are hit
+        # Ollama local execution
+        if self.provider == "ollama":
+            client = self.clients[0]
+            try:
+                response = client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.2,
+                )
+                raw_content = response.choices[0].message.content or ""
+                return extract_csharp_code(raw_content)
+            except Exception as e:
+                err_str = str(e)
+                if "Connection error" in err_str or "connection refused" in err_str.lower():
+                    self.logger.error(
+                        f"   [OLLAMA ERROR] Cannot connect to Ollama at {self.base_url}. "
+                        "Please ensure the Ollama service is running ('ollama serve')."
+                    )
+                elif "model" in err_str.lower() and "not found" in err_str.lower():
+                    self.logger.error(
+                        f"   [OLLAMA ERROR] Model '{self.model_name}' not found. "
+                        f"Run 'ollama pull {self.model_name}' to install it."
+                    )
+                else:
+                    self.logger.error(f"   [OLLAMA ERROR] {e}")
+                raise
+
+        # Cloud-based providers (Gemini / Qwen Cloud) with key rotation and fallback models
         models_to_try = [self.model_name]
-        fallback_models = ["gemini-3.5-flash-lite", "gemini-2.5-flash"]
-        for fm in fallback_models:
+        for fm in self.fallback_models:
             if fm not in models_to_try:
                 models_to_try.append(fm)
 
@@ -176,7 +270,7 @@ class AuthorAgent:
                             self.logger.warning(f"   [QUOTA EXHAUSTED] All keys exhausted quota for model {current_model}.")
                             break  # Try next fallback model
                     elif any(err_code in err_str for err_code in ["503", "502", "504", "500", "UNAVAILABLE"]):
-                        self.logger.warning(f"   [SERVER BUSY/503] Gemini service temporarily unavailable on {current_model}. Backing off 3s and retrying...")
+                        self.logger.warning(f"   [SERVER BUSY/503] Service temporarily unavailable on {current_model}. Backing off 3s and retrying...")
                         time.sleep(3.0)
                         self._rotate_client()
                         continue
@@ -188,5 +282,5 @@ class AuthorAgent:
                         self.logger.error(f"   [API ERROR] Unexpected error: {e}")
                         raise
 
-        self.logger.error("   [ALL KEYS & MODELS EXHAUSTED] All provided Gemini API keys and models have reached their quota limits.")
-        raise AllKeysRateLimitedError("All Gemini API keys and models reached rate limit quota.")
+        self.logger.error(f"   [ALL KEYS & MODELS EXHAUSTED] All provided {self.provider.upper()} API keys and models have reached their quota limits.")
+        raise AllKeysRateLimitedError(f"All {self.provider.upper()} API keys and models reached rate limit quota.")

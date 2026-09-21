@@ -13,14 +13,15 @@ class TestGenLoop:
         self,
         context_builder: ContextBuilder,
         test_csproj: Path,
-        model_name: str = "gemini-3.6-flash",
+        model_name: Optional[str] = None,
         target_coverage_pct: float = 90.0,
         max_retries: int = 4,
         author_agent: Optional[AuthorAgent] = None,  # Bug 14 fix: allow sharing AuthorAgent
+        provider: Optional[str] = None,
     ):
         self.context_builder = context_builder
         self.test_csproj = Path(test_csproj).resolve()
-        self.author = author_agent or AuthorAgent(model_name=model_name)
+        self.author = author_agent or AuthorAgent(model_name=model_name, provider=provider)
         self.critic = CriticAgent(
             test_csproj=self.test_csproj,
             target_coverage_pct=target_coverage_pct,
@@ -109,7 +110,7 @@ class TestGenLoop:
         # ── Step 2: Generation / Refinement Loop ──
         for iteration in range(1, self.max_retries + 1):
             action_desc = "refining existing test cases" if previous_code else "writing test cases from scratch"
-            self.logger.info(f"[Iteration {iteration}/{self.max_retries}] Author Agent (Gemini) {action_desc}...")
+            self.logger.info(f"[Iteration {iteration}/{self.max_retries}] Author Agent ({self.author.provider.title()}: {self.author.model_name}) {action_desc}...")
             start_time = time.time()
             test_code = self.author.generate_tests(
                 context=context,

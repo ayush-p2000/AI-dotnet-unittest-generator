@@ -139,7 +139,7 @@ class ContextBuilder:
         else:
             test_namespace = f"{project_name}.Tests"
 
-        # Format dependency summaries for Gemini with their exact source code snippets
+        # Format dependency summaries for the Author Agent with their exact source code snippets
         formatted_deps = []
         for name, info in dependencies.items():
             kind = info.get("kind", "type")

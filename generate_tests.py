@@ -58,7 +58,8 @@ def main():
     parser.add_argument("target_file", help="Name or relative path of the C# file to generate tests for")
     parser.add_argument("--manifest", default="scan_output.json", help="Path to the scan manifest JSON (default: scan_output.json)")
     parser.add_argument("--project", default=None, help="Project name when manifest has multiple projects")
-    parser.add_argument("--model", default="gemini-3.6-flash", help="Gemini model to use (default: gemini-3.6-flash)")
+    parser.add_argument("--provider", default="auto", choices=["auto", "ollama", "gemini", "qwen-cloud"], help="AI provider agent (default: auto)")
+    parser.add_argument("--model", default=None, help="Model name (default: auto-detected based on provider)")
     parser.add_argument("--coverage", type=float, default=90.0, help="Target coverage %% (default: 90)")
     parser.add_argument("--retries", type=int, default=4, help="Max author/critic iterations (default: 4)")
     args = parser.parse_args()
@@ -87,6 +88,7 @@ def main():
         model_name=args.model,
         target_coverage_pct=args.coverage,
         max_retries=args.retries,
+        provider=args.provider,
     )
 
     try:
@@ -97,7 +99,7 @@ def main():
         logger.info(f"[LOG SAVED] Log file written to: {get_current_log_file()}")
         logger.info("=" * 50)
     except AllKeysRateLimitedError:
-        logger.warning("\n[RATE LIMIT EXHAUSTED] All Gemini API keys have hit their daily quota limit.")
+        logger.warning("\n[RATE LIMIT EXHAUSTED] All API keys have hit their daily quota limit.")
         logger.info(f"Progress has been logged to: {get_current_log_file()}")
         logger.info("Run again later to resume!")
         sys.exit(0)
