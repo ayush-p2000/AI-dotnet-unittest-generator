@@ -59,6 +59,9 @@ class CriticAgent:
         compile_errors = self._parse_compile_errors(combined_output)
         if compile_errors:
             self.logger.warning(f"Critic: Compilation failed with {len(compile_errors)} error(s)")
+            feedback = "Compilation failed with the following C# compiler errors:\n"
+            feedback += "\n".join(f"- {err}" for err in compile_errors[:15])
+            feedback += "\n\nPlease fix ALL compiler errors above. Pay close attention to namespace, type names, and method signatures."
             return {
                 "status": "COMPILE_ERROR",
                 "passed": False,
@@ -68,8 +71,7 @@ class CriticAgent:
                 "uncovered_lines": [],
                 "target_met": False,
                 "compile_errors": compile_errors,
-                "feedback_message": "Compilation failed with the following C# compiler errors:\n"
-                + "\n".join(f"- {err}" for err in compile_errors[:10]),
+                "feedback_message": feedback,
                 "raw_output": stdout,
             }
 
@@ -83,7 +85,31 @@ class CriticAgent:
         # 3. Check for Test Runtime Failures
         test_failures = self._parse_test_failures(combined_output)
         if test_failures or proc.returncode != 0:
-            self.logger.warning(f"Critic: Tests failed during execution ({len(test_failures)} failure(s), {coverage_pct:.1f}% coverage)")
+            failure_count = len(test_failures)
+            self.logger.warning(f"Critic: Tests failed during execution ({failure_count} failure(s), {coverage_pct:.1f}% coverage)")
+
+            # Build the feedback message — NEVER let it be empty
+            if test_failures:
+                feedback = f"Tests failed during execution ({failure_count} failure(s), Coverage: {coverage_pct:.1f}%):\n"
+                feedback += "\n".join(f"- {f}" for f in test_failures[:15])
+            else:
+                # No structured test failures parsed, but build/test failed (returncode != 0).
+                # This typically means the build itself failed with errors we didn't catch
+                # in _parse_compile_errors (e.g., namespace mismatches, missing references).
+                build_errors = self._extract_build_error_summary(combined_output)
+                if build_errors:
+                    feedback = f"Build/test execution failed (returncode={proc.returncode}, Coverage: {coverage_pct:.1f}%).\n"
+                    feedback += "Detected errors from build output:\n"
+                    feedback += "\n".join(f"- {err}" for err in build_errors[:15])
+                else:
+                    # Last resort: include the last N lines of raw output
+                    tail_lines = [l.strip() for l in combined_output.splitlines() if l.strip()][-30:]
+                    feedback = f"Build/test execution failed (returncode={proc.returncode}, Coverage: {coverage_pct:.1f}%).\n"
+                    feedback += "Raw build output (last 30 lines):\n"
+                    feedback += "\n".join(tail_lines)
+
+            feedback += "\n\nPlease fix all errors above. Ensure namespaces, type names, and method signatures exactly match the source code provided in context."
+
             return {
                 "status": "TEST_FAILURE",
                 "passed": False,
@@ -93,8 +119,7 @@ class CriticAgent:
                 "target_met": False,
                 "test_failures": test_failures,
                 "uncovered_lines": uncovered_lines,
-                "feedback_message": f"Tests failed during execution (Coverage: {coverage_pct:.1f}%):\n"
-                + "\n".join(f"- {f}" for f in test_failures[:10]),
+                "feedback_message": feedback,
                 "raw_output": stdout,
             }
 
@@ -141,7 +166,15 @@ class CriticAgent:
         errors = []
         for line in output.splitlines():
             line_str = line.strip()
-            if ": error CS" in line_str or ": error NU" in line_str:
+            # Match standard C# compiler errors (CS*), NuGet errors (NU*),
+            # MSBuild errors (MSB*), and standalone MSBUILD errors
+            if (
+                ": error CS" in line_str
+                or ": error NU" in line_str
+                or ": error MSB" in line_str
+                or "MSBUILD : error" in line_str
+                or ": error FS" in line_str  # F# interop projects
+            ):
                 errors.append(line_str)
         return errors
 
@@ -152,10 +185,45 @@ class CriticAgent:
             line_str = line.strip()
             if line_str.startswith("Failed") or "Error Message:" in line_str:
                 failures.append(line_str)
-                # Grab the next line if it contains the assertion message
-                if i + 1 < len(lines) and lines[i + 1].strip():
-                    failures.append(lines[i + 1].strip())
+                # Grab subsequent indented lines (stack trace / assertion details)
+                for j in range(i + 1, min(i + 6, len(lines))):
+                    next_line = lines[j].strip()
+                    if next_line and (next_line.startswith("at ") or next_line.startswith("Expected") or next_line.startswith("Assert") or not next_line.startswith("[")):
+                        failures.append(next_line)
+                    else:
+                        break
         return failures
+
+    def _extract_build_error_summary(self, output: str) -> List[str]:
+        """
+        Fallback: when no structured compile errors or test failures were parsed,
+        but returncode != 0, extract the most informative error lines from raw output.
+        This prevents the author from receiving empty feedback.
+        """
+        error_lines = []
+        lines = output.splitlines()
+        for line in lines:
+            stripped = line.strip()
+            # Catch any line containing 'error' in a build-error-like context
+            if not stripped:
+                continue
+            lower = stripped.lower()
+            if any(marker in lower for marker in [
+                ": error", "build failed", "not found", "could not",
+                "does not exist", "is inaccessible", "no overload",
+                "cannot convert", "does not contain", "are you missing",
+                "the type or namespace", "ambiguous reference",
+                "failed to restore", "assets file",
+            ]):
+                error_lines.append(stripped)
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for line in error_lines:
+            if line not in seen:
+                seen.add(line)
+                unique.append(line)
+        return unique[:20]
 
     def _parse_coverage(self, results_dir: Path, target_file_name: str) -> Dict[str, Any]:
         """

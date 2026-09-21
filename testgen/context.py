@@ -127,6 +127,18 @@ class ContextBuilder:
         except Exception:
             rel_path = raw_path.name
 
+        # Compute the correct test namespace that matches the test project folder structure.
+        # The scaffold creates: tests/<ProjectName>.Tests/<SubFolder>/
+        # So the namespace should be: <ProjectName>.Tests.<SubFolder> (with dots for path separators)
+        # e.g., for project "WebApp" and sub_folder "Common" → "WebApp.Tests.Common"
+        project_name = project_info["project_name"] if project_info else "Tests"
+        if sub_folder:
+            # Convert path separators to dots for namespace: "Controllers/Api" → "Controllers.Api"
+            sub_ns = sub_folder.replace("\\", ".").replace("/", ".")
+            test_namespace = f"{project_name}.Tests.{sub_ns}"
+        else:
+            test_namespace = f"{project_name}.Tests"
+
         # Format dependency summaries for Gemini with their exact source code snippets
         formatted_deps = []
         for name, info in dependencies.items():
@@ -157,6 +169,7 @@ class ContextBuilder:
             "relative_path": rel_path,
             "sub_folder": sub_folder,
             "namespace": file_info["namespace"],
+            "test_namespace": test_namespace,
             "usings": file_info["usings"],
             "types": file_info["types"],
             "source_code": source_code,

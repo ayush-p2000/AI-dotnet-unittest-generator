@@ -73,7 +73,8 @@ class AuthorAgent:
         """
         file_name = context["file_name"]
         source_code = context["source_code"]
-        target_namespace = context["namespace"] or "Tests"
+        source_namespace = context["namespace"] or "Tests"
+        test_namespace = context.get("test_namespace", f"{source_namespace}.Tests")
         dependencies_context = context.get("formatted_dependencies_context", "No additional dependencies.")
 
         system_prompt = (
@@ -81,22 +82,25 @@ class AuthorAgent:
             "Your task is to write comprehensive, production-grade unit tests for the provided C# file to achieve >= 90% code coverage.\n\n"
             "Guidelines:\n"
             "1. Frameworks & Naming: Use xUnit ([Fact], [Theory], [InlineData]), Moq (Mock<T>, It.IsAny<T>(), Setup, Verify), and FluentAssertions (.Should().Be(), .Should().ThrowAsync<T>(), .Should().NotBeNull()). Name the test class `public class <TargetFileNameWithoutExtension>Test`.\n"
-            "2. Dependency Injection & Mocking:\n"
+            "2. NAMESPACE (CRITICAL): You MUST use the exact test namespace provided in the prompt (labeled 'Test Namespace'). "
+            "Do NOT derive the test namespace from the source namespace. Do NOT append '.Tests' to the source namespace. "
+            "The test namespace is pre-computed to match the test project's folder structure.\n"
+            "3. Dependency Injection & Mocking:\n"
             "   - Mock all injected interfaces (e.g., ILogger<T>, IServiceProvider, custom domain interfaces) using Moq (`new Mock<TInterface>()`).\n"
             "   - For async methods returning Task or ValueTask, use `.ReturnsAsync(...)` on mocked setups.\n"
             "   - Support CancellationToken (e.g., `It.IsAny<CancellationToken>()` or `CancellationToken.None`).\n"
-            "3. DbContext & EF Core Entities (if applicable):\n"
+            "4. DbContext & EF Core Entities (if applicable):\n"
             "   - If testing a class that depends on DbContext, use DbContextOptionsBuilder<TContext> with UseInMemoryDatabase(Guid.NewGuid().ToString()) so every test gets an isolated in-memory DB.\n"
             "   - When creating EF model entities, initialise ALL `required` properties shown in the dependency context. Pay close attention to enum types, navigation properties, and validation logic visible in the entity source code.\n"
-            "4. High Coverage & Edge Cases: Cover all public and internal methods, happy paths, null/invalid arguments (verify ArgumentNullException / ArgumentException), empty collections, non-matching IDs, exception flows, and every conditional branch.\n"
-            "5. Syntax & References: All mock setups, method names, and DTO properties must strictly match the definitions in the Context. Do not invent non-existent properties or methods.\n"
-            "6. Output Format: Return ONLY valid, complete C# code within a single ```csharp ... ``` code block. Do not include extra conversational text outside the code block."
-
+            "5. High Coverage & Edge Cases: Cover all public and internal methods, happy paths, null/invalid arguments (verify ArgumentNullException / ArgumentException), empty collections, non-matching IDs, exception flows, and every conditional branch.\n"
+            "6. Syntax & References: All mock setups, method names, and DTO properties must strictly match the definitions in the Context. Do not invent non-existent properties or methods.\n"
+            "7. Output Format: Return ONLY valid, complete C# code within a single ```csharp ... ``` code block. Do not include extra conversational text outside the code block."
         )
 
         user_content_parts = [
             f"## Target File to Test: `{file_name}`",
-            f"Namespace: `{target_namespace}`\n",
+            f"Source Namespace: `{source_namespace}`",
+            f"Test Namespace (USE THIS EXACTLY): `{test_namespace}`\n",
             "### Target File Source Code:\n```csharp\n" + source_code + "\n```\n",
             "### Context & Resolved Dependencies (DTOs, Interfaces to Mock, Enums, DbContext):\n" + dependencies_context + "\n"
         ]
