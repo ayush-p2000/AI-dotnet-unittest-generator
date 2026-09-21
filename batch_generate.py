@@ -25,6 +25,7 @@ try:
     from testgen.author import AllKeysRateLimitedError, AuthorAgent
     from testgen.context import ContextBuilder
     from testgen.logger import get_current_log_file, get_logger, setup_logger
+    from testgen.scaffold import scaffold_test_project
     from testgen.state import StateTracker
 except KeyboardInterrupt:
     print("\n\n[STOPPED] Execution cancelled by user (Ctrl+C). Exiting cleanly.")
@@ -294,8 +295,8 @@ def main():
         test_csproj = root / "tests" / f"{project_name}.Tests" / f"{project_name}.Tests.csproj"
 
         if not test_csproj.exists():
-            logger.warning(f"[WARNING] Test project not found at {test_csproj}. Run scaffold_tests.py first.")
-            continue
+            logger.info(f"[INFO] Test project not found at {test_csproj}. Automatically scaffolding test project...")
+            test_csproj = Path(scaffold_test_project(root, project["csproj"], project_name)).resolve()
 
         loop = TestGenLoop(
             context_builder=context_builder,

@@ -86,15 +86,30 @@ class AuthorAgent:
             "Do NOT derive the test namespace from the source namespace. Do NOT append '.Tests' to the source namespace. "
             "The test namespace is pre-computed to match the test project's folder structure.\n"
             "3. Dependency Injection & Mocking:\n"
-            "   - Mock all injected interfaces (e.g., ILogger<T>, IServiceProvider, custom domain interfaces) using Moq (`new Mock<TInterface>()`).\n"
-            "   - For async methods returning Task or ValueTask, use `.ReturnsAsync(...)` on mocked setups.\n"
-            "   - Support CancellationToken (e.g., `It.IsAny<CancellationToken>()` or `CancellationToken.None`).\n"
+            "   - Only mock interfaces (e.g., `Mock<IMyService>()`) or virtual/abstract methods. Do NOT attempt to mock non-virtual methods of concrete or sealed classes (Moq will throw NotSupportedException). For concrete classes, instantiate them directly with test data.\n"
+            "   - For async methods returning Task<T> or ValueTask<T>, use `.ReturnsAsync(...)`. For Task, use `.Returns(Task.CompletedTask)`.\n"
+            "   - For async methods with CancellationToken, use `It.IsAny<CancellationToken>()` in setups.\n"
+            "   - For `ILogger<T>`, use `Mock.Of<ILogger<T>>()` or `new Mock<ILogger<T>>()`; do not attempt strict verification on ILogger extension methods.\n"
             "4. DbContext & EF Core Entities (if applicable):\n"
             "   - If testing a class that depends on DbContext, use DbContextOptionsBuilder<TContext> with UseInMemoryDatabase(Guid.NewGuid().ToString()) so every test gets an isolated in-memory DB.\n"
-            "   - When creating EF model entities, initialise ALL `required` properties shown in the dependency context. Pay close attention to enum types, navigation properties, and validation logic visible in the entity source code.\n"
-            "5. High Coverage & Edge Cases: Cover all public and internal methods, happy paths, null/invalid arguments (verify ArgumentNullException / ArgumentException), empty collections, non-matching IDs, exception flows, and every conditional branch.\n"
-            "6. Syntax & References: All mock setups, method names, and DTO properties must strictly match the definitions in the Context. Do not invent non-existent properties or methods.\n"
-            "7. Output Format: Return ONLY valid, complete C# code within a single ```csharp ... ``` code block. Do not include extra conversational text outside the code block."
+            "   - When creating EF model entities, initialise ALL `required` and non-nullable properties shown in the dependency context. Pay close attention to enum types, navigation properties, and validation logic visible in the entity source code.\n"
+            "5. ASP.NET Core Controllers & APIs (if testing a Controller or ControllerBase):\n"
+            "   - When testing classes that inherit from `Controller` or return `View()`, `RedirectToAction()`, or use `TempData`/`ModelState`:\n"
+            "     Always configure `ControllerContext` and `TempData` to avoid InvalidOperationException on ITempDataDictionaryFactory:\n"
+            "     ```csharp\n"
+            "     var httpContext = new DefaultHttpContext();\n"
+            "     var tempData = new TempDataDictionary(httpContext, Mock.Of<ITempDataProvider>());\n"
+            "     var controller = new YourController(...) {\n"
+            "         ControllerContext = new ControllerContext { HttpContext = httpContext },\n"
+            "         TempData = tempData\n"
+            "     };\n"
+            "     ```\n"
+            "     Ensure necessary usings are present: `using Microsoft.AspNetCore.Http;` `using Microsoft.AspNetCore.Mvc;` `using Microsoft.AspNetCore.Mvc.ViewFeatures;`\n"
+            "6. Factory Methods & Private Constructors:\n"
+            "   - Check if the target class or DTO uses private constructors with static factory methods (e.g., `Result.Success(...)`, `Result.Error(...)`). Use the factory methods instead of calling private constructors.\n"
+            "7. High Coverage & Edge Cases: Cover all public and internal methods, happy paths, null/invalid arguments (verify ArgumentNullException / ArgumentException), empty collections, non-matching IDs, exception flows, and every conditional branch.\n"
+            "8. Syntax & References: All mock setups, method names, and DTO properties must strictly match the definitions in the Context. Do not invent non-existent properties or methods.\n"
+            "9. Output Format: Return ONLY valid, complete C# code within a single ```csharp ... ``` code block. Do not include extra conversational text outside the code block."
         )
 
         user_content_parts = [
@@ -122,39 +137,56 @@ class AuthorAgent:
 
         user_prompt = "\n".join(user_content_parts)
 
-        # Try each available API key once for rate-limiting.
-        num_keys = len(self.clients)
-        rate_limited_count = 0
+        # Try available API keys with fallback models if rate limits are hit
+        models_to_try = [self.model_name]
+        fallback_models = ["gemini-3.5-flash-lite", "gemini-2.5-flash"]
+        for fm in fallback_models:
+            if fm not in models_to_try:
+                models_to_try.append(fm)
 
-        for attempt in range(1, num_keys + 1):
-            client = self.clients[self.current_client_idx]
-            try:
-                response = client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.2,
-                )
-                raw_content = response.choices[0].message.content or ""
-                return extract_csharp_code(raw_content)
-            except Exception as e:
-                err_str = str(e)
-                # Rate limit / Quota errors -> rotate to next key
-                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "RateLimitError" in err_str:
-                    rate_limited_count += 1
-                    self.logger.warning(f"   [RATE LIMIT] Key #{self.current_client_idx + 1} reached quota limit.")
-                    if rate_limited_count < num_keys:
+        for current_model in models_to_try:
+            num_keys = len(self.clients)
+            rate_limited_count = 0
+
+            for attempt in range(1, num_keys + 1):
+                client = self.clients[self.current_client_idx]
+                key_num = self.current_client_idx + 1
+                try:
+                    response = client.chat.completions.create(
+                        model=current_model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=0.2,
+                    )
+                    raw_content = response.choices[0].message.content or ""
+                    return extract_csharp_code(raw_content)
+                except Exception as e:
+                    err_str = str(e)
+                    # Rate limit / Quota errors -> rotate to next key
+                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "RateLimitError" in err_str:
+                        rate_limited_count += 1
+                        self.logger.warning(f"   [RATE LIMIT] Key #{key_num} reached quota limit on {current_model}.")
+                        if rate_limited_count < num_keys:
+                            self._rotate_client()
+                            time.sleep(1.0)
+                            continue
+                        else:
+                            self.logger.warning(f"   [QUOTA EXHAUSTED] All keys exhausted quota for model {current_model}.")
+                            break  # Try next fallback model
+                    elif any(err_code in err_str for err_code in ["503", "502", "504", "500", "UNAVAILABLE"]):
+                        self.logger.warning(f"   [SERVER BUSY/503] Gemini service temporarily unavailable on {current_model}. Backing off 3s and retrying...")
+                        time.sleep(3.0)
                         self._rotate_client()
-                        time.sleep(1.0)
+                        continue
+                    elif any(err_code in err_str for err_code in ["400", "401", "403", "API_KEY_INVALID"]):
+                        self.logger.warning(f"   [INVALID KEY] Key #{key_num} returned authorization error. Rotating to next key...")
+                        self._rotate_client()
                         continue
                     else:
-                        self.logger.error("   [ALL KEYS EXHAUSTED] All provided Gemini API keys have reached their quota limits.")
-                        raise AllKeysRateLimitedError("All Gemini API keys reached rate limit quota.")
-                else:
-                    # Bug 7 fix: Non-rate-limit errors are not key-dependent; log and raise immediately
-                    self.logger.error(f"   [API ERROR] Non-rate-limit error: {e}")
-                    raise
+                        self.logger.error(f"   [API ERROR] Unexpected error: {e}")
+                        raise
 
-        raise AllKeysRateLimitedError("All Gemini API keys reached rate limit quota.")
+        self.logger.error("   [ALL KEYS & MODELS EXHAUSTED] All provided Gemini API keys and models have reached their quota limits.")
+        raise AllKeysRateLimitedError("All Gemini API keys and models reached rate limit quota.")

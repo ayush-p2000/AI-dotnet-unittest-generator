@@ -32,10 +32,15 @@ class CriticAgent:
             shutil.rmtree(results_dir, ignore_errors=True)
         results_dir.mkdir(parents=True, exist_ok=True)
 
+        stem = Path(target_file_name).stem
         cmd = [
             "dotnet",
             "test",
             str(self.test_csproj),
+            "--filter",
+            f"FullyQualifiedName~{stem}Test",
+            "--logger",
+            "trx;LogFileName=test_results.trx",
             "--collect:XPlat Code Coverage",
             "--results-directory",
             str(results_dir),
@@ -53,6 +58,32 @@ class CriticAgent:
 
         stdout = proc.stdout
         stderr = proc.stderr
+
+        # If no tests matched the specific filter, retry without filter
+        if "No test matches the given testcase filter" in stdout:
+            self.logger.info(f"Critic: No tests matched filter '{stem}Test', falling back to full suite run...")
+            cmd_unfiltered = [
+                "dotnet",
+                "test",
+                str(self.test_csproj),
+                "--logger",
+                "trx;LogFileName=test_results.trx",
+                "--collect:XPlat Code Coverage",
+                "--results-directory",
+                str(results_dir),
+                "-v",
+                "normal",
+            ]
+            proc = subprocess.run(
+                cmd_unfiltered,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )
+            stdout = proc.stdout
+            stderr = proc.stderr
+
         combined_output = f"{stdout}\n{stderr}"
 
         # 1. Check for Compilation / Build Errors
@@ -82,16 +113,22 @@ class CriticAgent:
         total_lines = cov_info["total_lines"]
         covered_lines = cov_info["covered_lines"]
 
-        # 3. Check for Test Runtime Failures
-        test_failures = self._parse_test_failures(combined_output)
+        # 3. Check for Test Runtime Failures (TRX first for 100% exact stack traces, then console fallback)
+        test_failures = self._parse_trx_failures(results_dir)
+        if not test_failures:
+            test_failures = self._parse_test_failures(combined_output)
+
         if test_failures or proc.returncode != 0:
             failure_count = len(test_failures)
             self.logger.warning(f"Critic: Tests failed during execution ({failure_count} failure(s), {coverage_pct:.1f}% coverage)")
 
             # Build the feedback message — NEVER let it be empty
             if test_failures:
-                feedback = f"Tests failed during execution ({failure_count} failure(s), Coverage: {coverage_pct:.1f}%):\n"
-                feedback += "\n".join(f"- {f}" for f in test_failures[:15])
+                feedback = f"Tests failed during execution ({failure_count} failure(s), Coverage: {coverage_pct:.1f}%):\n\n"
+                formatted_failures = []
+                for idx, f in enumerate(test_failures[:10], 1):
+                    formatted_failures.append(f"--- [Failure #{idx}] ---\n{f}")
+                feedback += "\n\n".join(formatted_failures)
             else:
                 # No structured test failures parsed, but build/test failed (returncode != 0).
                 # This typically means the build itself failed with errors we didn't catch
@@ -178,20 +215,79 @@ class CriticAgent:
                 errors.append(line_str)
         return errors
 
-    def _parse_test_failures(self, output: str) -> List[str]:
+    def _parse_trx_failures(self, results_dir: Path) -> List[str]:
+        """
+        Parses exact, untruncated error messages and complete stack traces
+        from Visual Studio Test Results XML (TRX) files.
+        """
         failures = []
-        lines = output.splitlines()
-        for i, line in enumerate(lines):
-            line_str = line.strip()
-            if line_str.startswith("Failed") or "Error Message:" in line_str:
-                failures.append(line_str)
-                # Grab subsequent indented lines (stack trace / assertion details)
-                for j in range(i + 1, min(i + 6, len(lines))):
-                    next_line = lines[j].strip()
-                    if next_line and (next_line.startswith("at ") or next_line.startswith("Expected") or next_line.startswith("Assert") or not next_line.startswith("[")):
-                        failures.append(next_line)
-                    else:
-                        break
+        trx_files = list(results_dir.glob("**/*.trx"))
+        if not trx_files:
+            return []
+
+        for trx_file in trx_files:
+            try:
+                tree = ET.parse(trx_file)
+                root = tree.getroot()
+                for result in root.iter():
+                    if result.tag.endswith("UnitTestResult") and result.attrib.get("outcome") == "Failed":
+                        test_name = result.attrib.get("testName", "Unknown Test")
+                        error_msg = ""
+                        stack_trace = ""
+
+                        for child in result.iter():
+                            if child.tag.endswith("Message") and child.text:
+                                error_msg = child.text.strip()
+                            elif child.tag.endswith("StackTrace") and child.text:
+                                stack_trace = child.text.strip()
+
+                        failure_parts = [f"Failed Test: `{test_name}`"]
+                        if error_msg:
+                            failure_parts.append(f"  Error Message:\n    {error_msg}")
+                        if stack_trace:
+                            failure_parts.append(f"  Stack Trace:\n    {stack_trace}")
+
+                        failures.append("\n".join(failure_parts))
+            except Exception as e:
+                self.logger.warning(f"Critic: Failed to parse TRX file {trx_file}: {e}")
+
+        return failures
+
+    def _parse_test_failures(self, output: str) -> List[str]:
+        """
+        Parses test failures from dotnet test console output.
+        Captures the complete error message and full stack trace without arbitrary line limits.
+        """
+        failures = []
+        current_failure = []
+        in_failure = False
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            # Detect start of a failed test in VSTest / xUnit
+            if stripped.startswith("Failed ") or (stripped.startswith("Failed:") and not stripped.startswith("Failed: 0")):
+                if current_failure:
+                    failures.append("\n".join(current_failure))
+                    current_failure = []
+                in_failure = True
+                current_failure.append(stripped)
+            elif in_failure:
+                # Stop when hitting a new test, summary section, or build status
+                if any(stripped.startswith(prefix) for prefix in [
+                    "Passed ", "Skipped ", "Test Run ", "Total tests:",
+                    "A total of ", "Results File:", "Attachments:",
+                    "Build succeeded.", "Build FAILED.", "Time Elapsed",
+                    "Passed:", "Failed:", "Skipped:"
+                ]):
+                    failures.append("\n".join(current_failure))
+                    current_failure = []
+                    in_failure = False
+                elif stripped:
+                    current_failure.append("  " + stripped)
+
+        if current_failure:
+            failures.append("\n".join(current_failure))
+
         return failures
 
     def _extract_build_error_summary(self, output: str) -> List[str]:

@@ -18,13 +18,19 @@ def run(cmd: List[str], cwd: Optional[Path] = None) -> subprocess.CompletedProce
     if result.stdout.strip():
         logger.info(result.stdout.strip())
     if result.returncode != 0:
-        logger.error(result.stderr.strip())
-        raise RuntimeError(f"Command failed with exit code {result.returncode}: {' '.join(cmd)}")
+        err_out = (result.stderr.strip() + "\n" + result.stdout.strip()).strip()
+        logger.error(err_out)
+        err_lines = [
+            line.strip() for line in err_out.splitlines()
+            if any(k in line for k in [": error ", "Error(s)", "Build FAILED", "error MSB", "error CS", "error CA"])
+        ]
+        summary = "\n".join(err_lines[:5]) if err_lines else err_out[:300]
+        raise RuntimeError(f"Command failed with exit code {result.returncode}: {' '.join(cmd)}\n{summary}")
     return result
 
 
 def detect_target_framework(csproj_path: Path) -> str:
-    """Detects target framework, handling both <TargetFramework> and multi-targeting <TargetFrameworks>."""
+    """Detects target framework, handling <TargetFramework>, <TargetFrameworks>, and Directory.Build.props."""
     text = csproj_path.read_text(encoding="utf-8-sig", errors="ignore")
     m = TFM_RE.search(text)
     if m:
@@ -41,6 +47,17 @@ def detect_target_framework(csproj_path: Path) -> str:
             if tfm.startswith("net") and "." in tfm:
                 return tfm
         return tfms[0] if tfms else "net8.0"
+
+    # Walk up parent directories to check Directory.Build.props
+    current = csproj_path.parent
+    while current != current.parent:
+        props = current / "Directory.Build.props"
+        if props.exists():
+            props_text = props.read_text(encoding="utf-8-sig", errors="ignore")
+            m_props = TFM_RE.search(props_text)
+            if m_props:
+                return m_props.group(1).strip()
+        current = current.parent
 
     return "net8.0"
 
@@ -150,19 +167,92 @@ def clean_obj_bin(folder: Path) -> None:
             shutil.rmtree(p, ignore_errors=True)
 
 
-def ensure_no_package_downgrade_warnings(test_csproj: Path) -> None:
-    """Suppresses NU1605 package downgrade warning-as-error when source project has newer package versions."""
+def ensure_test_project_isolation(test_csproj: Path, tests_dir: Path) -> None:
+    """
+    Isolates test projects from parent solution's strict code analysis/StyleCop/editorconfig rules.
+    1. Creates .editorconfig with root = true in tests_dir to block parent rules like CA1707 (no underscores in method names).
+    2. Configures test_csproj to disable analyzers and warnings-as-errors during build.
+    """
+    logger = get_logger()
+
+    # 1. Isolate via .editorconfig in the test project directory
+    editorconfig_path = tests_dir / ".editorconfig"
+    if not editorconfig_path.exists():
+        editorconfig_content = (
+            "root = true\n\n"
+            "[*]\n"
+            "dotnet_analyzer_diagnostic.severity = none\n\n"
+            "[*.cs]\n"
+            "dotnet_analyzer_diagnostic.severity = none\n"
+            "dotnet_diagnostic.CA1707.severity = none\n"
+            "dotnet_diagnostic.SA1600.severity = none\n"
+            "dotnet_diagnostic.SA1200.severity = none\n"
+            "dotnet_diagnostic.SA1101.severity = none\n"
+        )
+        editorconfig_path.write_text(editorconfig_content, encoding="utf-8")
+        logger.info(f"Created isolated .editorconfig at {editorconfig_path}")
+
+    # 2. Configure test_csproj MSBuild properties
     text = test_csproj.read_text(encoding="utf-8-sig", errors="ignore")
-    if "NU1605" in text:
-        return
-    nowarn_xml = (
-        "\n  <PropertyGroup>\n"
-        "    <NoWarn>$(NoWarn);NU1605</NoWarn>\n"
-        "  </PropertyGroup>\n"
+    if "RunAnalyzersDuringBuild" not in text:
+        isolation_xml = (
+            "\n  <PropertyGroup>\n"
+            "    <RunAnalyzersDuringBuild>false</RunAnalyzersDuringBuild>\n"
+            "    <EnableNETAnalyzers>false</EnableNETAnalyzers>\n"
+            "    <AnalysisMode>None</AnalysisMode>\n"
+            "    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>\n"
+            "    <CodeAnalysisTreatWarningsAsErrors>false</CodeAnalysisTreatWarningsAsErrors>\n"
+            "    <NoWarn>$(NoWarn);NU1605;CA1707;CS1591;SA1600;SA1200;SA1101;SA1633;SA1601</NoWarn>\n"
+            "  </PropertyGroup>\n"
+        )
+        if "</Project>" in text:
+            # Clean up older standalone NU1605 block if present
+            if "<NoWarn>$(NoWarn);NU1605</NoWarn>" in text:
+                text = re.sub(r"\s*<PropertyGroup>\s*<NoWarn>\$\(NoWarn\);NU1605</NoWarn>\s*</PropertyGroup>", "", text)
+            new_text = text.replace("</Project>", f"{isolation_xml}</Project>")
+            test_csproj.write_text(new_text, encoding="utf-8")
+            logger.info(f"Added build isolation properties to {test_csproj.name}")
+
+
+def ensure_aspnetcore_reference_if_needed(main_csproj: Path, test_csproj: Path) -> None:
+    """Ensures test project has Microsoft.AspNetCore.App framework reference when testing web apps or APIs."""
+    logger = get_logger()
+    main_text = main_csproj.read_text(encoding="utf-8-sig", errors="ignore")
+    test_text = test_csproj.read_text(encoding="utf-8-sig", errors="ignore")
+
+    is_web = (
+        'Sdk="Microsoft.NET.Sdk.Web"' in main_text
+        or "Microsoft.AspNetCore.App" in main_text
+        or "Microsoft.AspNetCore" in main_text
     )
-    if "</Project>" in text:
-        new_text = text.replace("</Project>", f"{nowarn_xml}</Project>")
-        test_csproj.write_text(new_text, encoding="utf-8")
+    if is_web and "Microsoft.AspNetCore.App" not in test_text:
+        framework_ref = (
+            "\n  <ItemGroup>\n"
+            "    <FrameworkReference Include=\"Microsoft.AspNetCore.App\" />\n"
+            "  </ItemGroup>\n"
+        )
+        if "</Project>" in test_text:
+            new_text = test_text.replace("</Project>", f"{framework_ref}</Project>")
+            test_csproj.write_text(new_text, encoding="utf-8")
+            logger.info(f"Added Microsoft.AspNetCore.App framework reference to {test_csproj.name}")
+
+
+def ensure_referenced_projects_linked(main_csproj: Path, test_csproj: Path) -> None:
+    """Wires sibling ProjectReferences from main project into the test project for multi-project solutions."""
+    logger = get_logger()
+    main_text = main_csproj.read_text(encoding="utf-8-sig", errors="ignore")
+    ref_matches = re.findall(r'<ProjectReference\s+Include="([^"]+)"', main_text, re.IGNORECASE)
+    for ref_rel in ref_matches:
+        referenced_path = (main_csproj.parent / ref_rel).resolve()
+        if referenced_path.exists() and referenced_path != test_csproj:
+            test_text = test_csproj.read_text(encoding="utf-8-sig", errors="ignore")
+            if referenced_path.name.lower() in test_text.lower():
+                continue
+            try:
+                run(["dotnet", "add", str(test_csproj), "reference", str(referenced_path)])
+                logger.info(f"Added sibling project reference to {referenced_path.name}")
+            except Exception as e:
+                logger.warning(f"Could not link sibling reference {referenced_path.name}: {e}")
 
 
 def scaffold_test_project(
@@ -204,19 +294,23 @@ def scaffold_test_project(
         if default_test_file.exists():
             default_test_file.unlink()
 
-    # 2. Suppress package downgrade error NU1605 on test project
-    ensure_no_package_downgrade_warnings(test_csproj)
+    # 2. Suppress package downgrade & analyzer warnings on test project
+    ensure_test_project_isolation(test_csproj, tests_dir)
 
-    # 3. Add core unit testing & mocking packages
+    # 3. Universal references for multi-project solutions & ASP.NET Core
+    ensure_aspnetcore_reference_if_needed(main_csproj, test_csproj)
+    ensure_referenced_projects_linked(main_csproj, test_csproj)
+
+    # 4. Add core unit testing & mocking packages
     add_package_if_missing(test_csproj, "Moq")
     add_package_if_missing(test_csproj, "FluentAssertions")
 
-    # 4. Add EF Core InMemory provider if main project uses EF Core
+    # 5. Add EF Core InMemory provider if main project uses EF Core
     ef_ver = get_efcore_version(main_csproj, tfm)
     if ef_ver:
         add_package_if_missing(test_csproj, "Microsoft.EntityFrameworkCore.InMemory", ef_ver)
 
-    # 5. Wire to solution
+    # 6. Wire to solution
     sln_candidates = list(root_path.glob("*.sln"))
     if sln_candidates:
         sln_path = sln_candidates[0]
@@ -237,14 +331,21 @@ def scaffold_test_project(
 
     if verify_build:
         # Clean corrupted obj/bin in main project to avoid duplicate attribute errors.
-        # This is intentionally limited to the explicit scaffold workflow: the
-        # critic immediately builds/tests during generation, and deleting build
-        # artifacts for every single-file request can race with active tooling.
         clean_obj_bin(main_csproj.parent)
 
         logger.info("\n--- Verifying test project build ---")
-        run(["dotnet", "build", str(test_csproj)])
-        logger.info("Test project built successfully!\n")
+        try:
+            run(["dotnet", "build", str(test_csproj)])
+            logger.info("Test project built successfully!\n")
+        except RuntimeError as e:
+            # If the test project already had test files and failed due to them,
+            # warn instead of hard aborting so the user can use the Critic/Author loop to heal them.
+            existing_tests = [f for f in tests_dir.glob("**/*.cs") if f.name != "UnitTest1.cs"]
+            if existing_tests:
+                logger.warning(f"Build verification warning on existing test files: {e}")
+                logger.info("Test project scaffolded; existing test files will be addressed during generation loop.\n")
+            else:
+                raise
 
     return test_csproj
 
