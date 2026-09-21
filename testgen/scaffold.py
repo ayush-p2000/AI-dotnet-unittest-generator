@@ -255,6 +255,26 @@ def ensure_referenced_projects_linked(main_csproj: Path, test_csproj: Path) -> N
                 logger.warning(f"Could not link sibling reference {referenced_path.name}: {e}")
 
 
+def find_solution_file(root_path: Path) -> Optional[Path]:
+    """Finds an existing .sln or .slnx file in root_path or up to 3 parent directories."""
+    for pattern in ["*.sln", "*.slnx"]:
+        matches = list(root_path.glob(pattern))
+        if matches:
+            return matches[0]
+
+    curr = root_path.parent
+    depth = 0
+    while curr != curr.parent and depth < 3:
+        for pattern in ["*.sln", "*.slnx"]:
+            matches = list(curr.glob(pattern))
+            if matches:
+                return matches[0]
+        curr = curr.parent
+        depth += 1
+
+    return None
+
+
 def scaffold_test_project(
     root: str,
     csproj_path: str,
@@ -310,24 +330,27 @@ def scaffold_test_project(
     if ef_ver:
         add_package_if_missing(test_csproj, "Microsoft.EntityFrameworkCore.InMemory", ef_ver)
 
-    # 6. Wire to solution
-    sln_candidates = list(root_path.glob("*.sln"))
-    if sln_candidates:
-        sln_path = sln_candidates[0]
-    else:
+    # 6. Wire to solution (safely, never failing scaffolding if sln cannot be updated)
+    sln_path = find_solution_file(root_path)
+    if not sln_path:
         sln_path = root_path / f"{project_name}.sln"
-        run(["dotnet", "new", "sln", "-n", project_name, "-o", str(root_path)])
+        try:
+            run(["dotnet", "new", "sln", "-n", project_name, "-o", str(root_path), "--force"])
+            logger.info(f"Created new solution file: {sln_path}")
+        except Exception as sln_err:
+            logger.warning(f"Could not create solution file: {sln_err}")
+            sln_path = None
 
+    if sln_path and sln_path.exists():
+        try:
+            run(["dotnet", "sln", str(sln_path), "add", str(main_csproj)])
+        except Exception:
+            pass
 
-    try:
-        run(["dotnet", "sln", str(sln_path), "add", str(main_csproj)])
-    except RuntimeError:
-        pass
-
-    try:
-        run(["dotnet", "sln", str(sln_path), "add", str(test_csproj)])
-    except RuntimeError:
-        pass
+        try:
+            run(["dotnet", "sln", str(sln_path), "add", str(test_csproj)])
+        except Exception:
+            pass
 
     if verify_build:
         # Clean corrupted obj/bin in main project to avoid duplicate attribute errors.
