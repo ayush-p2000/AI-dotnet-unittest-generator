@@ -439,9 +439,11 @@ def main():
     save_report_json(all_batch_results, all_batch_skipped, elapsed, Path(args.report))
 
     if rate_limit_interrupted:
-        logger.info(f"[INFO] Batch run paused due to API quota. Resume later with: python batch_generate.py")
+        logger.error(f"[ERROR] Batch run stopped: All API keys exhausted. Exiting.")
+        sys.exit(1)
     elif keyboard_interrupted:
         logger.info(f"[INFO] Batch run halted by user. Resume anytime with: python batch_generate.py")
+        sys.exit(130)
 
 
 if __name__ == "__main__":

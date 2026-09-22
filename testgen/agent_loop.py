@@ -84,6 +84,12 @@ class TestGenLoop:
                 self.logger.info(f"[MIGRATED] Moved and renamed '{legacy_flat_tests.name}' -> '{test_file_path.name}' in '{sub_folder}/'")
 
 
+        original_existing_code: Optional[str] = (
+            test_file_path.read_text(encoding="utf-8", errors="ignore")
+            if test_file_path.exists()
+            else None
+        )
+
         # ── Step 1: Check existing test file ──
         if test_file_path.exists() and test_file_path.stat().st_size > 50:
             self.logger.info(f"[FOUND] Existing test file found: {test_file_path}")
@@ -149,9 +155,22 @@ class TestGenLoop:
 
         # If loop finishes without meeting the exact >= 90% threshold
         self.logger.info(f"\n[MAX RETRIES] Reached max retries ({self.max_retries}). Best achieved coverage: {best_coverage:.1f}%")
+
+        # Cleanup uncompilable test code so it doesn't break subsequent project builds
+        if best_coverage == 0.0 or (critic_feedback and critic_feedback.get("status") == "COMPILE_ERROR"):
+            if original_existing_code:
+                test_file_path.write_text(original_existing_code, encoding="utf-8")
+                self.logger.warning(f"   [REVERT] Reverted '{test_file_path.name}' to previous version because generated tests failed to compile.")
+            elif test_file_path.exists():
+                try:
+                    test_file_path.unlink()
+                    self.logger.warning(f"   [CLEANUP] Deleted uncompilable test file '{test_file_path.name}' to prevent project build corruption.")
+                except Exception as e:
+                    self.logger.warning(f"   [CLEANUP] Could not remove test file: {e}")
+
         return {
             "file": target_file_name,
-            "test_file": str(test_file_path),
+            "test_file": str(test_file_path) if test_file_path.exists() else "",
             "status": "PARTIAL_OR_FAILED",
             "coverage_pct": best_coverage,
             "iterations": self.max_retries,

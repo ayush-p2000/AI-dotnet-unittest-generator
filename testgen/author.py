@@ -233,11 +233,13 @@ class AuthorAgent:
                     self.logger.error(f"   [OLLAMA ERROR] {e}")
                 raise
 
-        # Cloud-based providers (Gemini / Qwen Cloud) with key rotation and fallback models
+        # Cloud-based providers (Gemini / Qwen Cloud) with key rotation
         models_to_try = [self.model_name]
-        for fm in self.fallback_models:
-            if fm not in models_to_try:
-                models_to_try.append(fm)
+        # Only use fallback models if explicitly enabled via environment variable
+        if os.environ.get("ENABLE_MODEL_FALLBACK", "false").lower() in ("true", "1"):
+            for fm in self.fallback_models:
+                if fm not in models_to_try:
+                    models_to_try.append(fm)
 
         for current_model in models_to_try:
             num_keys = len(self.clients)
