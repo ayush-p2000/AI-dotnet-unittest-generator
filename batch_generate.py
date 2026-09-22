@@ -13,6 +13,8 @@ Usage:
 """
 import argparse
 import json
+import os
+import stat
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed

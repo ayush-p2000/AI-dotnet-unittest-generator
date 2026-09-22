@@ -296,6 +296,17 @@ class CriticAgent:
         but returncode != 0, extract the most informative error lines from raw output.
         This prevents the author from receiving empty feedback.
         """
+        # Known noisy MSBuild/NuGet informational lines that are NOT errors
+        noise_patterns = [
+            "assets file has not changed",
+            "skipping assets file writing",
+            "source link is empty",
+            "sourcelink.json",
+            "determining projects to restore",
+            "all projects are up-to-date for restore",
+            "nothing to do. none of the projects",
+        ]
+
         error_lines = []
         lines = output.splitlines()
         for line in lines:
@@ -304,12 +315,17 @@ class CriticAgent:
             if not stripped:
                 continue
             lower = stripped.lower()
+
+            # Skip known benign MSBuild noise before checking markers
+            if any(noise in lower for noise in noise_patterns):
+                continue
+
             if any(marker in lower for marker in [
                 ": error", "build failed", "not found", "could not",
                 "does not exist", "is inaccessible", "no overload",
                 "cannot convert", "does not contain", "are you missing",
                 "the type or namespace", "ambiguous reference",
-                "failed to restore", "assets file",
+                "failed to restore",
             ]):
                 error_lines.append(stripped)
         # Deduplicate while preserving order

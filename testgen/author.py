@@ -213,6 +213,7 @@ class AuthorAgent:
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.2,
+                    timeout=120.0,
                 )
                 raw_content = response.choices[0].message.content or ""
                 return extract_csharp_code(raw_content)
@@ -253,6 +254,7 @@ class AuthorAgent:
                             {"role": "user", "content": user_prompt},
                         ],
                         temperature=0.2,
+                        timeout=120.0,
                     )
                     raw_content = response.choices[0].message.content or ""
                     return extract_csharp_code(raw_content)

@@ -343,6 +343,7 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
 
             cmd = [
                 sys.executable,
+                "-u",
                 "batch_generate.py",
                 "--provider", provider,
                 "--model", model_name,
