@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from testgen.dotnet import get_dotnet_cmd
+
 
 @dataclass
 class VerificationResult:
@@ -50,8 +52,9 @@ class VerifierAgent:
         """
         Executes 'dotnet build' and 'dotnet test'.
         """
+        dotnet_cmd = get_dotnet_cmd()
         # 1. Run dotnet build
-        build_cmd = ["dotnet", "build", str(self.target_path), "-v", "minimal"]
+        build_cmd = [dotnet_cmd, "build", str(self.target_path), "-v", "minimal"]
         proc_build = subprocess.run(
             build_cmd,
             capture_output=True,
@@ -72,7 +75,7 @@ class VerifierAgent:
 
         # 2. Run dotnet test (if tests are enabled and exist)
         if run_tests:
-            test_cmd = ["dotnet", "test", str(self.target_path), "--no-build", "-v", "normal"]
+            test_cmd = [dotnet_cmd, "test", str(self.target_path), "--no-build", "-v", "normal"]
             proc_test = subprocess.run(
                 test_cmd,
                 capture_output=True,

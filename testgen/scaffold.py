@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from testgen.dotnet import get_dotnet_cmd
 from testgen.logger import get_logger
 
 TFM_RE = re.compile(r"<TargetFramework>\s*([^<\s]+)\s*</TargetFramework>", re.IGNORECASE)
@@ -13,6 +14,9 @@ TFMS_RE = re.compile(r"<TargetFrameworks>\s*([^<\s]+)\s*</TargetFrameworks>", re
 
 def run(cmd: List[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
     logger = get_logger()
+    cmd = list(cmd)
+    if cmd and cmd[0] == "dotnet":
+        cmd[0] = get_dotnet_cmd()
     logger.info(f"$ {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True)
     if result.stdout.strip():
@@ -336,6 +340,7 @@ def scaffold_test_project(
         sln_path = root_path / f"{project_name}.sln"
         try:
             run(["dotnet", "new", "sln", "-n", project_name, "-o", str(root_path), "--force"])
+            sln_path = find_solution_file(root_path) or sln_path
             logger.info(f"Created new solution file: {sln_path}")
         except Exception as sln_err:
             logger.warning(f"Could not create solution file: {sln_err}")

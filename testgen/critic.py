@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from testgen.dotnet import get_dotnet_cmd
 from testgen.logger import get_logger
 
 
@@ -33,8 +34,9 @@ class CriticAgent:
         results_dir.mkdir(parents=True, exist_ok=True)
 
         stem = Path(target_file_name).stem
+        dotnet_cmd = get_dotnet_cmd()
         cmd = [
-            "dotnet",
+            dotnet_cmd,
             "test",
             str(self.test_csproj),
             "--filter",
@@ -63,7 +65,7 @@ class CriticAgent:
         if "No test matches the given testcase filter" in stdout:
             self.logger.info(f"Critic: No tests matched filter '{stem}Test', falling back to full suite run...")
             cmd_unfiltered = [
-                "dotnet",
+                dotnet_cmd,
                 "test",
                 str(self.test_csproj),
                 "--logger",

@@ -13,8 +13,11 @@ from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 
-# Load local environment
+from testgen.dotnet import ensure_dotnet_env
+
+# Load local environment & configure dotnet
 load_dotenv()
+ensure_dotnet_env()
 
 # Global in-memory log buffer
 LOG_BUFFER: List[Dict[str, str]] = []
@@ -588,6 +591,7 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def run_server(port: int = 5000):
+    socketserver.TCPServer.allow_reuse_address = True
     server = socketserver.ThreadingTCPServer(("127.0.0.1", port), StudioHandler)
     server.daemon_threads = True
     add_log(f"Nemotron C# Studio Server listening at http://127.0.0.1:{port}", "sys")

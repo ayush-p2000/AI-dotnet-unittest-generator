@@ -68,6 +68,25 @@ else:
     except Exception as e:
         print(f"    [FAIL] Gemini verification error: {e}")
 
+# 3. Check .NET SDK
+print(f"\n[3] Checking .NET SDK...")
+try:
+    from testgen.dotnet import find_dotnet, ensure_dotnet_env
+    ensure_dotnet_env()
+    dotnet_bin = find_dotnet()
+    if dotnet_bin:
+        import subprocess
+        proc = subprocess.run([dotnet_bin, "--version"], capture_output=True, text=True)
+        version = proc.stdout.strip()
+        print(f"    [OK] dotnet binary: {dotnet_bin}")
+        print(f"    [OK] .NET SDK Version: {version}")
+        print("    [READY] .NET SDK IS FULLY OPERATIONAL")
+    else:
+        print("    [FAIL] .NET SDK ('dotnet') not found.")
+        print("    [INFO] Please install .NET 8+ SDK: https://dotnet.microsoft.com/download")
+except Exception as e:
+    print(f"    [FAIL] Could not verify .NET SDK: {e}")
+
 print("\n" + "=" * 60)
 print("  VERIFICATION COMPLETE")
 print("=" * 60)
