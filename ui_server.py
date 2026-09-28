@@ -123,6 +123,12 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                 try:
                     with open(manifest_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
+                    root = Path(data.get("root", os.getcwd()))
+                    for p in data.get("projects", []):
+                        p_name = p.get("project_name", "")
+                        test_csproj = root / "tests" / f"{p_name}.Tests" / f"{p_name}.Tests.csproj"
+                        p["scaffolded"] = test_csproj.exists()
+                        p["test_csproj"] = str(test_csproj) if test_csproj.exists() else None
                     self._send_json(data)
                     return
                 except Exception as e:
@@ -181,6 +187,18 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                         "available": bool(os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")),
                         "models": ["qwen3-coder-plus", "qwen3-coder-next", "qwen2.5-coder-32b-instruct"],
                         "default_model": "qwen3-coder-plus"
+                    },
+                    "openrouter": {
+                        "name": "OpenRouter",
+                        "available": bool(os.getenv("OPENROUTER_API_KEY")),
+                        "models": [
+                            "nvidia/nemotron-3-ultra-550b-a55b:free",
+                            "qwen/qwen-2.5-coder-32b-instruct",
+                            "deepseek/deepseek-chat",
+                            "anthropic/claude-3.5-sonnet",
+                            "meta-llama/llama-3.3-70b-instruct"
+                        ],
+                        "default_model": os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
                     }
                 }
             })
@@ -236,6 +254,13 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                 with open(out_file, "w", encoding="utf-8") as f:
                     json.dump(manifest, f, indent=2)
 
+                root = Path(manifest.get("root", os.getcwd()))
+                for p in manifest.get("projects", []):
+                    p_name = p.get("project_name", "")
+                    test_csproj = root / "tests" / f"{p_name}.Tests" / f"{p_name}.Tests.csproj"
+                    p["scaffolded"] = test_csproj.exists()
+                    p["test_csproj"] = str(test_csproj) if test_csproj.exists() else None
+
                 add_log(f"Scan complete. Found {len(manifest.get('projects', []))} project(s).", "success")
                 self._send_json(manifest)
             except Exception as e:
@@ -277,12 +302,13 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
         # 3. Single File Test Gen
         elif path == "/api/testgen/single":
             file_name = body.get("file_name")
+            req_project_name = body.get("project_name", "")
             provider = body.get("provider", "ollama")
             model_name = body.get("model", "qwen3-coder:latest")
             target_cov = float(body.get("coverage", 90.0))
             max_retries = int(body.get("retries", 4))
 
-            add_log(f"Starting test generation for {file_name} (Target: {target_cov}%, Agent: {provider}, Model: {model_name})...", "sys")
+            add_log(f"Starting test generation for {file_name} (Project: {req_project_name or 'auto'}, Target: {target_cov}%, Agent: {provider}, Model: {model_name})...", "sys")
 
             def run_single():
                 try:
@@ -294,12 +320,13 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                     from testgen.scaffold import scaffold_test_project
 
                     builder = ContextBuilder(manifest)
-                    file_info, project_info = builder.find_file_and_project(file_name)
+                    file_info, project_info = builder.find_file_and_project(file_name, project_name=req_project_name or None)
                     if not file_info or not project_info:
                         raise FileNotFoundError(f"File '{file_name}' is no longer present in the scan manifest.")
 
                     root = manifest["root"]
                     project_name = project_info["project_name"]
+                    add_log(f"Resolved file to project: {project_name}", "info")
                     test_csproj = (
                         Path(root)
                         / "tests"

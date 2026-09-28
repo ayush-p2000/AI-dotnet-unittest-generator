@@ -30,28 +30,51 @@ class ContextBuilder:
         self.root = manifest.get("root", "")
         self.logger = get_logger()
 
-    def find_file_and_project(self, file_path_or_name: str) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    def find_file_and_project(self, file_path_or_name: str, project_name: str = None) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """
+        Finds a file entry and its parent project in the manifest.
+
+        Priority order:
+        1. Exact absolute path match (unambiguous).
+        2. Name-based match scoped to project_name (if provided).
+        3. Name-based match across all projects (fallback).
+        """
         target = Path(file_path_or_name).resolve()
         target_name = target.name.lower()
 
+        # 1. Exact path match — always correct, regardless of project
         for project in self.projects:
             for f in project["files"]:
-                p = Path(f["path"]).resolve()
-                if p == target or p.name.lower() == target_name:
+                if Path(f["path"]).resolve() == target:
                     return f, project
+
+        # 2. Name-based match scoped to a specific project (avoids cross-project confusion)
+        if project_name:
+            for project in self.projects:
+                if project["project_name"] == project_name:
+                    for f in project["files"]:
+                        if Path(f["path"]).name.lower() == target_name:
+                            return f, project
+
+        # 3. Fallback: name-based match across all projects (legacy behaviour)
+        for project in self.projects:
+            for f in project["files"]:
+                if Path(f["path"]).name.lower() == target_name:
+                    return f, project
+
         return None, None
 
-    def find_file_info(self, file_path_or_name: str) -> Optional[Dict[str, Any]]:
-        f, _ = self.find_file_and_project(file_path_or_name)
+    def find_file_info(self, file_path_or_name: str, project_name: str = None) -> Optional[Dict[str, Any]]:
+        f, _ = self.find_file_and_project(file_path_or_name, project_name=project_name)
         return f
 
-    def resolve_dependencies(self, file_info: Dict[str, Any]) -> Dict[str, Any]:
+    def resolve_dependencies(self, file_info: Dict[str, Any], source_code: str = "") -> Dict[str, Any]:
         """
         Identifies all types needed to write tests for this file:
         - Constructor injected dependencies (interfaces/services)
         - Method parameter and return types (DTOs, models, entities)
         - Base classes and interfaces implemented
-        - Enums referenced
+        - Enums and records referenced in method bodies (e.g. published events, DTO instantiations)
         """
         discovered_types: Set[str] = set()
 
@@ -72,6 +95,13 @@ class ContextBuilder:
             # 4. Property types
             for p in t.get("properties", []):
                 discovered_types.update(extract_type_tokens(p.get("type", "")))
+
+        # 5. Method body tokens: scan for any types in symbol_table referenced in source code (e.g. TradeExecuted, FeeCollectionEvent)
+        if source_code:
+            words = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", source_code))
+            for word in words:
+                if word in self.symbol_table:
+                    discovered_types.add(word)
 
         # 2nd pass: For all resolved types (like DbContext), extract types from their DbSets and properties
         secondary_types: Set[str] = set()
@@ -94,8 +124,8 @@ class ContextBuilder:
 
         return resolved_symbols
 
-    def build_prompt_context(self, file_path_or_name: str) -> Dict[str, Any]:
-        file_info, project_info = self.find_file_and_project(file_path_or_name)
+    def build_prompt_context(self, file_path_or_name: str, project_name: str = None) -> Dict[str, Any]:
+        file_info, project_info = self.find_file_and_project(file_path_or_name, project_name=project_name)
         if not file_info:
             raise FileNotFoundError(f"File '{file_path_or_name}' not found in scan manifest.")
 
@@ -108,7 +138,7 @@ class ContextBuilder:
             self.logger.warning(f"Could not read source file from disk '{raw_path}': {e}")
             source_code = f"// Source file {raw_path.name} could not be read directly from disk."
 
-        dependencies = self.resolve_dependencies(file_info)
+        dependencies = self.resolve_dependencies(file_info, source_code=source_code)
 
         # Bug 2 fix: compute relative sub-folder and relative path safely with try/except
         sub_folder = ""

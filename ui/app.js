@@ -7,6 +7,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let currentScanData = null;
   let logPollingInterval = null;
   let currentSonarIssues = [];
+  const scaffoldedProjects = new Set();
 
   // DOM Elements - Navigation & Views
   const scannerView = document.getElementById("scannerView");
@@ -343,35 +344,118 @@ document.addEventListener("DOMContentLoaded", () => {
   // ==========================================================================
   // TestGen: Project Scaffolding & Form Population
   // ==========================================================================
+  // Helper to populate the Target C# File dropdown ONLY for the specified project
+  function updateSingleFileDropdown(projectName) {
+    singleFileSelect.innerHTML = "";
+
+    if (!projectName) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Select a scaffolded project above...";
+      singleFileSelect.appendChild(opt);
+      singleFileSelect.disabled = true;
+      return;
+    }
+
+    if (!currentScanData || !currentScanData.projects) {
+      singleFileSelect.disabled = true;
+      return;
+    }
+
+    const proj = currentScanData.projects.find((p) => p.project_name === projectName);
+    if (!proj || !proj.files || proj.files.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = `No source files found in ${projectName}`;
+      singleFileSelect.appendChild(opt);
+      singleFileSelect.disabled = true;
+      return;
+    }
+
+    singleFileSelect.disabled = false;
+    const defaultOpt = document.createElement("option");
+    defaultOpt.value = "";
+    defaultOpt.textContent = `Choose a file from ${proj.project_name} (${proj.files.length} files)...`;
+    singleFileSelect.appendChild(defaultOpt);
+
+    // ONLY add files belonging to the scaffolded project
+    proj.files.forEach((file) => {
+      const fOpt = document.createElement("option");
+      fOpt.value = file.path;
+      fOpt.textContent = file.relative_path || file.file_name;
+      singleFileSelect.appendChild(fOpt);
+    });
+  }
+
+  // Handle changing target project in Step 1
+  function onScaffoldProjectChanged() {
+    const selectedProj = scaffoldProjectSelect.value;
+    if (!selectedProj || !currentScanData || !currentScanData.projects) {
+      scaffoldBadge.textContent = "Required";
+      scaffoldBadge.className = "status-badge";
+      scaffoldResultMsg.style.display = "none";
+      updateSingleFileDropdown(null);
+      return;
+    }
+
+    const proj = currentScanData.projects.find((p) => p.project_name === selectedProj);
+    const isScaffolded = proj && (proj.scaffolded || scaffoldedProjects.has(selectedProj));
+
+    if (isScaffolded) {
+      scaffoldBadge.textContent = "Ready";
+      scaffoldBadge.className = "status-badge status-ready";
+      if (proj && proj.test_csproj) {
+        scaffoldResultMsg.className = "inline-msg success";
+        scaffoldResultMsg.innerHTML = `<strong>Test Project Ready:</strong> <code>${proj.test_csproj}</code>`;
+        scaffoldResultMsg.style.display = "block";
+      } else {
+        scaffoldResultMsg.style.display = "none";
+      }
+    } else {
+      scaffoldBadge.textContent = "Required";
+      scaffoldBadge.className = "status-badge";
+      scaffoldResultMsg.style.display = "none";
+    }
+
+    // Strictly limit Target C# File dropdown to only this project's files
+    updateSingleFileDropdown(selectedProj);
+  }
+
+  scaffoldProjectSelect.addEventListener("change", onScaffoldProjectChanged);
+
   function populateTestGenSelectors(manifest) {
-    // 1. Scaffold project select
     scaffoldProjectSelect.innerHTML = '<option value="">Select target project...</option>';
     batchProjectSelect.innerHTML = '<option value="ALL">All Projects (Sequential)</option>';
-    singleFileSelect.innerHTML = '<option value="">Choose a scanned file...</option>';
 
-    if (!manifest || !manifest.projects) return;
+    if (!manifest || !manifest.projects) {
+      updateSingleFileDropdown(null);
+      return;
+    }
 
     manifest.projects.forEach((proj) => {
+      if (proj.scaffolded) {
+        scaffoldedProjects.add(proj.project_name);
+      }
+
       const opt = document.createElement("option");
       opt.value = proj.project_name;
-      opt.textContent = `${proj.project_name} (${proj.files.length} files)`;
+      const statusLabel = proj.scaffolded ? " [Test Ready]" : "";
+      opt.textContent = `${proj.project_name} (${proj.files.length} files)${statusLabel}`;
       scaffoldProjectSelect.appendChild(opt);
 
       const batchOpt = opt.cloneNode(true);
       batchProjectSelect.appendChild(batchOpt);
-
-      // Files for single mode
-      proj.files.forEach((file) => {
-        const fOpt = document.createElement("option");
-        fOpt.value = file.file_name;
-        fOpt.textContent = `[${proj.project_name}] ${file.relative_path || file.file_name}`;
-        singleFileSelect.appendChild(fOpt);
-      });
     });
 
-    if (manifest.projects.length > 0) {
+    // Default select first scaffolded project if available, otherwise first project
+    const defaultScaffolded = manifest.projects.find((p) => p.scaffolded);
+    if (defaultScaffolded) {
+      scaffoldProjectSelect.value = defaultScaffolded.project_name;
+    } else if (manifest.projects.length > 0) {
       scaffoldProjectSelect.selectedIndex = 1;
     }
+
+    onScaffoldProjectChanged();
   }
 
   btnScaffold.addEventListener("click", async () => {
@@ -396,12 +480,24 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to scaffold test project.");
 
+      scaffoldedProjects.add(selectedProj);
+      if (currentScanData && currentScanData.projects) {
+        const pObj = currentScanData.projects.find((p) => p.project_name === selectedProj);
+        if (pObj) {
+          pObj.scaffolded = true;
+          pObj.test_csproj = data.test_csproj;
+        }
+      }
+
       scaffoldBadge.textContent = "Ready";
       scaffoldBadge.className = "status-badge status-ready";
       scaffoldResultMsg.className = "inline-msg success";
       scaffoldResultMsg.innerHTML = `<strong>Test Project Ready:</strong> <code>${data.test_csproj}</code>`;
       scaffoldResultMsg.style.display = "block";
       logToTerminal(`Test project scaffolded successfully: ${data.test_csproj}`, "success");
+
+      // Immediately refresh single file select with only the scaffolded project's files
+      updateSingleFileDropdown(selectedProj);
 
     } catch (err) {
       scaffoldResultMsg.className = "inline-msg error";
@@ -444,6 +540,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const payload = {
       file_name: targetFile,
+      project_name: scaffoldProjectSelect.value || "",
       provider: providerSelect ? providerSelect.value : "ollama",
       model: modelSelect ? modelSelect.value : "qwen3-coder:latest",
       coverage: parseFloat(coverageSlider.value),

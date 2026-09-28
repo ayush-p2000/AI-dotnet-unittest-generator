@@ -44,7 +44,7 @@ def get_qwen_api_keys() -> List[str]:
 
 def resolve_provider(provider: Optional[str] = None, model_name: Optional[str] = None) -> str:
     """
-    Determines whether to use 'ollama' (Local Qwen 3 Coder), 'gemini', or 'qwen-cloud'.
+    Determines whether to use 'ollama', 'gemini', 'qwen-cloud', or 'openrouter'.
     """
     if provider and provider.lower() not in ["auto", ""]:
         return provider.lower()
@@ -53,11 +53,13 @@ def resolve_provider(provider: Optional[str] = None, model_name: Optional[str] =
         m = model_name.lower()
         if m.startswith("gemini"):
             return "gemini"
+        if "/" in m:
+            return "openrouter"
         if m.startswith("qwen") or "coder" in m:
-            # If QWEN_API_KEY is present and OLLAMA_BASE_URL not set, could be cloud,
-            # but user has local Ollama installed, so default to ollama unless specified.
             if os.environ.get("AI_PROVIDER") == "qwen-cloud":
                 return "qwen-cloud"
+            if os.environ.get("AI_PROVIDER") == "openrouter":
+                return "openrouter"
             return "ollama"
 
     return os.environ.get("AI_PROVIDER", "ollama").lower()
@@ -109,6 +111,15 @@ class AuthorAgent:
             self.clients = [OpenAI(base_url=self.base_url, api_key=k) for k in self.api_keys]
             self.fallback_models = ["qwen3-coder-next"]
             self.logger.info(f"[INFO] AuthorAgent initialized with Qwen Cloud ({len(self.clients)} key(s), Model: {self.model_name}).")
+
+        elif self.provider == "openrouter":
+            self.base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+            self.model_name = model_name or os.environ.get("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
+            api_key = os.environ.get("OPENROUTER_API_KEY", "")
+            self.api_keys = [api_key] if api_key else []
+            self.clients = [OpenAI(base_url=self.base_url, api_key=api_key or "no-key")]
+            self.fallback_models = []
+            self.logger.info(f"[INFO] AuthorAgent initialized with OpenRouter (Model: {self.model_name}, Endpoint: {self.base_url}).")
 
         else:  # "gemini"
             self.provider = "gemini"
@@ -173,7 +184,9 @@ class AuthorAgent:
             "6. Factory Methods & Private Constructors:\n"
             "   - Check if the target class or DTO uses private constructors with static factory methods (e.g., `Result.Success(...)`, `Result.Error(...)`). Use the factory methods instead of calling private constructors.\n"
             "7. High Coverage & Edge Cases: Cover all public and internal methods, happy paths, null/invalid arguments (verify ArgumentNullException / ArgumentException), empty collections, non-matching IDs, exception flows, and every conditional branch.\n"
-            "8. Syntax & References: All mock setups, method names, and DTO properties must strictly match the definitions in the Context. Do not invent non-existent properties or methods.\n"
+            "8. Syntax & References: All mock setups, method names, and DTO/record properties must strictly match the definitions in the Context. Do not invent non-existent properties or methods.\n"
+            "   - When verifying message bus events (e.g. `publishEndpoint.Publish<T>()`), use `_publishEndpointMock.Verify(p => p.Publish(It.IsAny<T>(), It.IsAny<CancellationToken>()), ...)` unless the exact record properties are provided in Context.\n"
+            "   - When arranging domain entities with collection properties (e.g. `wallet.Assets`), always initialize the collection (e.g. `Assets = new List<Asset>()` or `Assets = []`) rather than leaving it null, because domain methods often invoke `.Add()` directly on navigation collections.\n"
             "9. Output Format: Return ONLY valid, complete C# code within a single ```csharp ... ``` code block. Do not include extra conversational text outside the code block."
         )
 
