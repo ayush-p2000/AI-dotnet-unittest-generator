@@ -13,8 +13,11 @@ from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 
-# Load local environment
+from testgen.dotnet import ensure_dotnet_env
+
+# Load local environment & configure dotnet
 load_dotenv()
+ensure_dotnet_env()
 
 # Global in-memory log buffer
 LOG_BUFFER: List[Dict[str, str]] = []
@@ -120,6 +123,12 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                 try:
                     with open(manifest_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
+                    root = Path(data.get("root", os.getcwd()))
+                    for p in data.get("projects", []):
+                        p_name = p.get("project_name", "")
+                        test_csproj = root / "tests" / f"{p_name}.Tests" / f"{p_name}.Tests.csproj"
+                        p["scaffolded"] = test_csproj.exists()
+                        p["test_csproj"] = str(test_csproj) if test_csproj.exists() else None
                     self._send_json(data)
                     return
                 except Exception as e:
@@ -138,6 +147,61 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_error("Job not found.", 404)
             else:
                 self._send_json(job)
+            return
+
+        elif path == "/api/providers/models":
+            # Detect local Ollama models dynamically
+            ollama_models = []
+            ollama_available = False
+            try:
+                import urllib.request
+                req = urllib.request.Request("http://localhost:11434/api/tags", headers={"User-Agent": "AI-TestGen"})
+                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                    if resp.status == 200:
+                        tags_data = json.loads(resp.read().decode())
+                        ollama_models = [m["name"] for m in tags_data.get("models", [])]
+                        ollama_available = True
+            except Exception:
+                ollama_available = False
+
+            if not ollama_models:
+                ollama_models = ["qwen3-coder:latest", "qwen2.5-coder:latest"]
+
+            self._send_json({
+                "default_provider": os.getenv("AI_PROVIDER", "ollama"),
+                "providers": {
+                    "ollama": {
+                        "name": "Qwen 3 Coder (Local Ollama)",
+                        "available": ollama_available,
+                        "models": ollama_models,
+                        "default_model": "qwen3-coder:latest"
+                    },
+                    "gemini": {
+                        "name": "Google Gemini (AI Studio)",
+                        "available": bool(os.getenv("GEMINI_API_KEY")),
+                        "models": ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-2.5-pro"],
+                        "default_model": "gemini-3.6-flash"
+                    },
+                    "qwen-cloud": {
+                        "name": "Qwen Cloud (DashScope / Remote)",
+                        "available": bool(os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")),
+                        "models": ["qwen3-coder-plus", "qwen3-coder-next", "qwen2.5-coder-32b-instruct"],
+                        "default_model": "qwen3-coder-plus"
+                    },
+                    "openrouter": {
+                        "name": "OpenRouter",
+                        "available": bool(os.getenv("OPENROUTER_API_KEY")),
+                        "models": [
+                            "nvidia/nemotron-3-ultra-550b-a55b:free",
+                            "qwen/qwen-2.5-coder-32b-instruct",
+                            "deepseek/deepseek-chat",
+                            "anthropic/claude-3.5-sonnet",
+                            "meta-llama/llama-3.3-70b-instruct"
+                        ],
+                        "default_model": os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
+                    }
+                }
+            })
             return
 
         # 2. Static Assets Serving
@@ -190,6 +254,13 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                 with open(out_file, "w", encoding="utf-8") as f:
                     json.dump(manifest, f, indent=2)
 
+                root = Path(manifest.get("root", os.getcwd()))
+                for p in manifest.get("projects", []):
+                    p_name = p.get("project_name", "")
+                    test_csproj = root / "tests" / f"{p_name}.Tests" / f"{p_name}.Tests.csproj"
+                    p["scaffolded"] = test_csproj.exists()
+                    p["test_csproj"] = str(test_csproj) if test_csproj.exists() else None
+
                 add_log(f"Scan complete. Found {len(manifest.get('projects', []))} project(s).", "success")
                 self._send_json(manifest)
             except Exception as e:
@@ -231,11 +302,13 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
         # 3. Single File Test Gen
         elif path == "/api/testgen/single":
             file_name = body.get("file_name")
-            model_name = body.get("model", "gemini-3.6-flash")
+            req_project_name = body.get("project_name", "")
+            provider = body.get("provider", "ollama")
+            model_name = body.get("model", "qwen3-coder:latest")
             target_cov = float(body.get("coverage", 90.0))
             max_retries = int(body.get("retries", 4))
 
-            add_log(f"Starting test generation for {file_name} (Target: {target_cov}%, Model: {model_name})...", "sys")
+            add_log(f"Starting test generation for {file_name} (Project: {req_project_name or 'auto'}, Target: {target_cov}%, Agent: {provider}, Model: {model_name})...", "sys")
 
             def run_single():
                 try:
@@ -247,12 +320,13 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                     from testgen.scaffold import scaffold_test_project
 
                     builder = ContextBuilder(manifest)
-                    file_info, project_info = builder.find_file_and_project(file_name)
+                    file_info, project_info = builder.find_file_and_project(file_name, project_name=req_project_name or None)
                     if not file_info or not project_info:
                         raise FileNotFoundError(f"File '{file_name}' is no longer present in the scan manifest.")
 
                     root = manifest["root"]
                     project_name = project_info["project_name"]
+                    add_log(f"Resolved file to project: {project_name}", "info")
                     test_csproj = (
                         Path(root)
                         / "tests"
@@ -260,9 +334,6 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                         / f"{project_name}.Tests.csproj"
                     )
                     if not test_csproj.exists():
-                        # First use may not have completed the explicit scaffold step.
-                        # After it exists, generation must not repeatedly edit the
-                        # solution or remove build artifacts.
                         test_csproj = scaffold_test_project(root, project_info["csproj"], project_name)
 
                     add_log(f"Using test project: {test_csproj} (exists: {test_csproj.exists()})", "info")
@@ -273,6 +344,7 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                         model_name=model_name,
                         target_coverage_pct=target_cov,
                         max_retries=max_retries,
+                        provider=provider,
                     )
                     res = loop.process_file(file_info["path"])
                     res["passed"] = res.get("status") == "SUCCESS"
@@ -294,13 +366,16 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
             concurrency = int(body.get("concurrency", 1))
             resume = body.get("resume", True)
             force = body.get("force", False)
-            model_name = body.get("model", "gemini-3.6-flash")
+            provider = body.get("provider", "ollama")
+            model_name = body.get("model", "qwen3-coder:latest")
 
-            add_log(f"Launching batch test generation for project: {proj_name}...", "sys")
+            add_log(f"Launching batch test generation for project: {proj_name} (Agent: {provider}, Model: {model_name})...", "sys")
 
             cmd = [
                 sys.executable,
+                "-u",
                 "batch_generate.py",
+                "--provider", provider,
                 "--model", model_name,
                 "--concurrency", str(concurrency),
             ]
@@ -543,6 +618,7 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def run_server(port: int = 5000):
+    socketserver.TCPServer.allow_reuse_address = True
     server = socketserver.ThreadingTCPServer(("127.0.0.1", port), StudioHandler)
     server.daemon_threads = True
     add_log(f"Nemotron C# Studio Server listening at http://127.0.0.1:{port}", "sys")
@@ -554,5 +630,10 @@ def run_server(port: int = 5000):
 
 
 if __name__ == "__main__":
-    p = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
+    import argparse
+    parser = argparse.ArgumentParser(description="AI TestGen Studio Server")
+    parser.add_argument("--port", type=int, default=5000, help="Port to run server on")
+    parser.add_argument("pos_port", nargs="?", type=int, default=None, help="Optional positional port")
+    cli_args = parser.parse_args()
+    p = cli_args.pos_port or cli_args.port
     run_server(p)

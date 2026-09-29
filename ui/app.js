@@ -7,6 +7,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let currentScanData = null;
   let logPollingInterval = null;
   let currentSonarIssues = [];
+  const scaffoldedProjects = new Set();
 
   // DOM Elements - Navigation & Views
   const scannerView = document.getElementById("scannerView");
@@ -46,12 +47,15 @@ document.addEventListener("DOMContentLoaded", () => {
   const singleModeForm = document.getElementById("singleModeForm");
   const batchModeForm = document.getElementById("batchModeForm");
   const singleFileSelect = document.getElementById("singleFileSelect");
+  const providerSelect = document.getElementById("providerSelect");
   const modelSelect = document.getElementById("modelSelect");
   const coverageSlider = document.getElementById("coverageSlider");
   const coverageVal = document.getElementById("coverageVal");
   const retriesInput = document.getElementById("retriesInput");
   const btnRunSingleTestGen = document.getElementById("btnRunSingleTestGen");
   const batchProjectSelect = document.getElementById("batchProjectSelect");
+  const batchProviderSelect = document.getElementById("batchProviderSelect");
+  const batchModelSelect = document.getElementById("batchModelSelect");
   const concurrencySelect = document.getElementById("concurrencySelect");
   const batchResumeCheck = document.getElementById("batchResumeCheck");
   const batchForceCheck = document.getElementById("batchForceCheck");
@@ -139,10 +143,65 @@ document.addEventListener("DOMContentLoaded", () => {
   startLogPolling();
 
   // ==========================================================================
+  // Provider & Model Dynamic Loading
+  // ==========================================================================
+  let providerData = null;
+
+  function populateModelsForSelect(selectEl, providerKey) {
+    if (!selectEl) return;
+    selectEl.innerHTML = "";
+    if (!providerData || !providerData.providers || !providerData.providers[providerKey]) {
+      const opt = document.createElement("option");
+      opt.value = providerKey === "gemini" ? "gemini-3.6-flash" : "qwen3-coder:latest";
+      opt.textContent = opt.value;
+      selectEl.appendChild(opt);
+      return;
+    }
+    const info = providerData.providers[providerKey];
+    info.models.forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = m;
+      selectEl.appendChild(opt);
+    });
+    if (info.default_model) {
+      selectEl.value = info.default_model;
+    }
+  }
+
+  if (providerSelect) {
+    providerSelect.addEventListener("change", () => {
+      populateModelsForSelect(modelSelect, providerSelect.value);
+    });
+  }
+
+  if (batchProviderSelect) {
+    batchProviderSelect.addEventListener("change", () => {
+      populateModelsForSelect(batchModelSelect, batchProviderSelect.value);
+    });
+  }
+
+  // ==========================================================================
   // Initial Page Load: Check Defaults & Scan Manifest
   // ==========================================================================
   async function init() {
     try {
+      // 0. Fetch AI Providers and Models
+      try {
+        const provRes = await fetch("/api/providers/models");
+        if (provRes.ok) {
+          providerData = await provRes.json();
+          if (providerData.default_provider) {
+            if (providerSelect) providerSelect.value = providerData.default_provider;
+            if (batchProviderSelect) batchProviderSelect.value = providerData.default_provider;
+          }
+          if (providerSelect) populateModelsForSelect(modelSelect, providerSelect.value);
+          if (batchProviderSelect) populateModelsForSelect(batchModelSelect, batchProviderSelect.value);
+        }
+      } catch (err) {
+        console.warn("Could not load AI providers", err);
+      }
+
       // 1. Fetch server config defaults (.env)
       const cfgRes = await fetch("/api/config");
       if (cfgRes.ok) {
@@ -285,35 +344,118 @@ document.addEventListener("DOMContentLoaded", () => {
   // ==========================================================================
   // TestGen: Project Scaffolding & Form Population
   // ==========================================================================
+  // Helper to populate the Target C# File dropdown ONLY for the specified project
+  function updateSingleFileDropdown(projectName) {
+    singleFileSelect.innerHTML = "";
+
+    if (!projectName) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Select a scaffolded project above...";
+      singleFileSelect.appendChild(opt);
+      singleFileSelect.disabled = true;
+      return;
+    }
+
+    if (!currentScanData || !currentScanData.projects) {
+      singleFileSelect.disabled = true;
+      return;
+    }
+
+    const proj = currentScanData.projects.find((p) => p.project_name === projectName);
+    if (!proj || !proj.files || proj.files.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = `No source files found in ${projectName}`;
+      singleFileSelect.appendChild(opt);
+      singleFileSelect.disabled = true;
+      return;
+    }
+
+    singleFileSelect.disabled = false;
+    const defaultOpt = document.createElement("option");
+    defaultOpt.value = "";
+    defaultOpt.textContent = `Choose a file from ${proj.project_name} (${proj.files.length} files)...`;
+    singleFileSelect.appendChild(defaultOpt);
+
+    // ONLY add files belonging to the scaffolded project
+    proj.files.forEach((file) => {
+      const fOpt = document.createElement("option");
+      fOpt.value = file.path;
+      fOpt.textContent = file.relative_path || file.file_name;
+      singleFileSelect.appendChild(fOpt);
+    });
+  }
+
+  // Handle changing target project in Step 1
+  function onScaffoldProjectChanged() {
+    const selectedProj = scaffoldProjectSelect.value;
+    if (!selectedProj || !currentScanData || !currentScanData.projects) {
+      scaffoldBadge.textContent = "Required";
+      scaffoldBadge.className = "status-badge";
+      scaffoldResultMsg.style.display = "none";
+      updateSingleFileDropdown(null);
+      return;
+    }
+
+    const proj = currentScanData.projects.find((p) => p.project_name === selectedProj);
+    const isScaffolded = proj && (proj.scaffolded || scaffoldedProjects.has(selectedProj));
+
+    if (isScaffolded) {
+      scaffoldBadge.textContent = "Ready";
+      scaffoldBadge.className = "status-badge status-ready";
+      if (proj && proj.test_csproj) {
+        scaffoldResultMsg.className = "inline-msg success";
+        scaffoldResultMsg.innerHTML = `<strong>Test Project Ready:</strong> <code>${proj.test_csproj}</code>`;
+        scaffoldResultMsg.style.display = "block";
+      } else {
+        scaffoldResultMsg.style.display = "none";
+      }
+    } else {
+      scaffoldBadge.textContent = "Required";
+      scaffoldBadge.className = "status-badge";
+      scaffoldResultMsg.style.display = "none";
+    }
+
+    // Strictly limit Target C# File dropdown to only this project's files
+    updateSingleFileDropdown(selectedProj);
+  }
+
+  scaffoldProjectSelect.addEventListener("change", onScaffoldProjectChanged);
+
   function populateTestGenSelectors(manifest) {
-    // 1. Scaffold project select
     scaffoldProjectSelect.innerHTML = '<option value="">Select target project...</option>';
     batchProjectSelect.innerHTML = '<option value="ALL">All Projects (Sequential)</option>';
-    singleFileSelect.innerHTML = '<option value="">Choose a scanned file...</option>';
 
-    if (!manifest || !manifest.projects) return;
+    if (!manifest || !manifest.projects) {
+      updateSingleFileDropdown(null);
+      return;
+    }
 
     manifest.projects.forEach((proj) => {
+      if (proj.scaffolded) {
+        scaffoldedProjects.add(proj.project_name);
+      }
+
       const opt = document.createElement("option");
       opt.value = proj.project_name;
-      opt.textContent = `${proj.project_name} (${proj.files.length} files)`;
+      const statusLabel = proj.scaffolded ? " [Test Ready]" : "";
+      opt.textContent = `${proj.project_name} (${proj.files.length} files)${statusLabel}`;
       scaffoldProjectSelect.appendChild(opt);
 
       const batchOpt = opt.cloneNode(true);
       batchProjectSelect.appendChild(batchOpt);
-
-      // Files for single mode
-      proj.files.forEach((file) => {
-        const fOpt = document.createElement("option");
-        fOpt.value = file.file_name;
-        fOpt.textContent = `[${proj.project_name}] ${file.relative_path || file.file_name}`;
-        singleFileSelect.appendChild(fOpt);
-      });
     });
 
-    if (manifest.projects.length > 0) {
+    // Default select first scaffolded project if available, otherwise first project
+    const defaultScaffolded = manifest.projects.find((p) => p.scaffolded);
+    if (defaultScaffolded) {
+      scaffoldProjectSelect.value = defaultScaffolded.project_name;
+    } else if (manifest.projects.length > 0) {
       scaffoldProjectSelect.selectedIndex = 1;
     }
+
+    onScaffoldProjectChanged();
   }
 
   btnScaffold.addEventListener("click", async () => {
@@ -338,12 +480,24 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to scaffold test project.");
 
+      scaffoldedProjects.add(selectedProj);
+      if (currentScanData && currentScanData.projects) {
+        const pObj = currentScanData.projects.find((p) => p.project_name === selectedProj);
+        if (pObj) {
+          pObj.scaffolded = true;
+          pObj.test_csproj = data.test_csproj;
+        }
+      }
+
       scaffoldBadge.textContent = "Ready";
       scaffoldBadge.className = "status-badge status-ready";
       scaffoldResultMsg.className = "inline-msg success";
       scaffoldResultMsg.innerHTML = `<strong>Test Project Ready:</strong> <code>${data.test_csproj}</code>`;
       scaffoldResultMsg.style.display = "block";
       logToTerminal(`Test project scaffolded successfully: ${data.test_csproj}`, "success");
+
+      // Immediately refresh single file select with only the scaffolded project's files
+      updateSingleFileDropdown(selectedProj);
 
     } catch (err) {
       scaffoldResultMsg.className = "inline-msg error";
@@ -386,7 +540,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const payload = {
       file_name: targetFile,
-      model: modelSelect.value,
+      project_name: scaffoldProjectSelect.value || "",
+      provider: providerSelect ? providerSelect.value : "ollama",
+      model: modelSelect ? modelSelect.value : "qwen3-coder:latest",
       coverage: parseFloat(coverageSlider.value),
       retries: parseInt(retriesInput.value, 10),
     };
@@ -427,7 +583,8 @@ document.addEventListener("DOMContentLoaded", () => {
       force: batchForceCheck.checked,
       coverage: parseFloat(coverageSlider.value),
       retries: parseInt(retriesInput.value, 10),
-      model: modelSelect.value,
+      provider: batchProviderSelect ? batchProviderSelect.value : "ollama",
+      model: batchModelSelect ? batchModelSelect.value : "qwen3-coder:latest",
     };
 
     btnRunBatchTestGen.disabled = true;

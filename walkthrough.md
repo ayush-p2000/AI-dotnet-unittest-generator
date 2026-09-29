@@ -26,8 +26,9 @@ A fully automated, project-agnostic 2-agent (Author + Critic) unit test generato
 - Recursively resolves dependencies (DTOs, injected interfaces, DbSets, entity models, enums).
 - Extracts full source code snippets for all dependent entities so the Author Agent sees required properties, enum validations, and navigation properties.
 
-### 1.4 Dual-Agent Loop (`testgen/author.py`, `testgen/critic.py`, `testgen/agent_loop.py`)
-- **Author Agent (Gemini)**: Writes complete xUnit test files following best practices (isolated in-memory DBs, boundary conditions, edge cases, null arguments).
+### 1.4 Multi-Agent Support & Dual-Agent Loop (`testgen/author.py`, `testgen/critic.py`, `testgen/agent_loop.py`)
+- **Multi-Agent Provider Selection**: Seamlessly choose between **Local Ollama (Qwen 3 Coder)** for private, zero-cost, offline execution (`http://localhost:11434/v1`), **Google Gemini** (`gemini-3.6-flash`, etc.) with automatic multi-key failover rotation, and **Qwen Cloud (DashScope)**.
+- **Author Agent**: Writes complete xUnit test files following best practices (isolated in-memory DBs, boundary conditions, edge cases, null arguments).
 - **Critic Agent (Runner)**: Compiles the test project via `dotnet test --collect:"XPlat Code Coverage"`, parses compiler errors, test failure stack traces, and line-by-line Cobertura coverage.
 - **Auto-Healing Loop**: Feeds back exact error lines and uncovered line numbers to the Author Agent to refine the test code iteratively up to the target threshold (>= 90%).
 

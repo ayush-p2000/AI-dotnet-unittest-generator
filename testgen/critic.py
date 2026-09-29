@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from testgen.dotnet import get_dotnet_cmd
 from testgen.logger import get_logger
 
 
@@ -33,8 +34,9 @@ class CriticAgent:
         results_dir.mkdir(parents=True, exist_ok=True)
 
         stem = Path(target_file_name).stem
+        dotnet_cmd = get_dotnet_cmd()
         cmd = [
-            "dotnet",
+            dotnet_cmd,
             "test",
             str(self.test_csproj),
             "--filter",
@@ -63,7 +65,7 @@ class CriticAgent:
         if "No test matches the given testcase filter" in stdout:
             self.logger.info(f"Critic: No tests matched filter '{stem}Test', falling back to full suite run...")
             cmd_unfiltered = [
-                "dotnet",
+                dotnet_cmd,
                 "test",
                 str(self.test_csproj),
                 "--logger",
@@ -296,6 +298,17 @@ class CriticAgent:
         but returncode != 0, extract the most informative error lines from raw output.
         This prevents the author from receiving empty feedback.
         """
+        # Known noisy MSBuild/NuGet informational lines that are NOT errors
+        noise_patterns = [
+            "assets file has not changed",
+            "skipping assets file writing",
+            "source link is empty",
+            "sourcelink.json",
+            "determining projects to restore",
+            "all projects are up-to-date for restore",
+            "nothing to do. none of the projects",
+        ]
+
         error_lines = []
         lines = output.splitlines()
         for line in lines:
@@ -304,12 +317,17 @@ class CriticAgent:
             if not stripped:
                 continue
             lower = stripped.lower()
+
+            # Skip known benign MSBuild noise before checking markers
+            if any(noise in lower for noise in noise_patterns):
+                continue
+
             if any(marker in lower for marker in [
                 ": error", "build failed", "not found", "could not",
                 "does not exist", "is inaccessible", "no overload",
                 "cannot convert", "does not contain", "are you missing",
                 "the type or namespace", "ambiguous reference",
-                "failed to restore", "assets file",
+                "failed to restore",
             ]):
                 error_lines.append(stripped)
         # Deduplicate while preserving order
