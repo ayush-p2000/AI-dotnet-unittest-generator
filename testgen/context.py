@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -118,13 +119,23 @@ class ContextBuilder:
 
         # Resolve all discovered types from the symbol table
         resolved_symbols: Dict[str, Any] = {}
+        target_type_names = {t["name"] for t in file_info.get("types", [])}
         for type_name in discovered_types:
+            if type_name in target_type_names:
+                continue  # Never include target class in its own dependencies
             if type_name in self.symbol_table:
                 resolved_symbols[type_name] = self.symbol_table[type_name]
 
         return resolved_symbols
 
     def build_prompt_context(self, file_path_or_name: str, project_name: str = None) -> Dict[str, Any]:
+        from testgen.chunker import (
+            extract_method_chunks,
+            prioritize_methods,
+            build_priority_blueprint,
+            skeletonize_dependency,
+        )
+
         file_info, project_info = self.find_file_and_project(file_path_or_name, project_name=project_name)
         if not file_info:
             raise FileNotFoundError(f"File '{file_path_or_name}' not found in scan manifest.")
@@ -158,18 +169,14 @@ class ContextBuilder:
             rel_path = raw_path.name
 
         # Compute the correct test namespace that matches the test project folder structure.
-        # The scaffold creates: tests/<ProjectName>.Tests/<SubFolder>/
-        # So the namespace should be: <ProjectName>.Tests.<SubFolder> (with dots for path separators)
-        # e.g., for project "WebApp" and sub_folder "Common" → "WebApp.Tests.Common"
         project_name = project_info["project_name"] if project_info else "Tests"
         if sub_folder:
-            # Convert path separators to dots for namespace: "Controllers/Api" → "Controllers.Api"
             sub_ns = sub_folder.replace("\\", ".").replace("/", ".")
             test_namespace = f"{project_name}.Tests.{sub_ns}"
         else:
             test_namespace = f"{project_name}.Tests"
 
-        # Format dependency summaries for the Author Agent with their exact source code snippets
+        # Format dependency summaries using clean C# contract skeletons to minimize token consumption
         formatted_deps = []
         for name, info in dependencies.items():
             kind = info.get("kind", "type")
@@ -180,7 +187,8 @@ class ContextBuilder:
             if file_p and Path(file_p).exists():
                 try:
                     dep_code = Path(file_p).read_text(encoding="utf-8-sig", errors="ignore")
-                    dep_block.append(f"```csharp\n{dep_code.strip()}\n```")
+                    skeleton_code = skeletonize_dependency(dep_code, kind, name)
+                    dep_block.append(f"```csharp\n{skeleton_code.strip()}\n```")
                 except Exception:
                     pass
             else:
@@ -193,6 +201,38 @@ class ContextBuilder:
 
             formatted_deps.append("\n".join(dep_block))
 
+        formatted_context_str = "\n\n".join(formatted_deps) if formatted_deps else "No internal dependencies needed."
+
+        # Extract method chunks and prioritize functions by complexity
+        main_type_name = file_info["types"][0]["name"] if file_info.get("types") else None
+        method_chunks = extract_method_chunks(source_code, class_name=main_type_name)
+        prioritized_chunks = prioritize_methods(method_chunks)
+        priority_blueprint = build_priority_blueprint(prioritized_chunks)
+
+        # Context limit for Google Gemini
+        context_limit_str = (
+            os.environ.get("CONTEXT_LIMIT")
+            or os.environ.get("MAX_CONTEXT_TOKENS")
+        )
+        if context_limit_str:
+            try:
+                # Approximate ~3.5 chars per code token in C#
+                allowed_chars = int(int(context_limit_str) * 3.5)
+                allowed_dep_chars = max(2000, allowed_chars - len(source_code) - 3000)
+                if len(formatted_context_str) > allowed_dep_chars:
+                    formatted_context_str = formatted_context_str[:allowed_dep_chars] + "\n\n// ... [Dependencies trimmed to fit CONTEXT_LIMIT]"
+            except ValueError:
+                pass
+
+        max_chars_str = os.environ.get("MAX_CONTEXT_CHARS")
+        if max_chars_str:
+            try:
+                max_chars = int(max_chars_str)
+                if max_chars > 0 and len(formatted_context_str) > max_chars:
+                    formatted_context_str = formatted_context_str[:max_chars] + "\n\n// ... [Context truncated to MAX_CONTEXT_CHARS limit]"
+            except ValueError:
+                pass
+
         return {
             "file_name": file_info["file_name"],
             "full_path": str(raw_path),
@@ -203,6 +243,8 @@ class ContextBuilder:
             "usings": file_info["usings"],
             "types": file_info["types"],
             "source_code": source_code,
+            "method_chunks": method_chunks,
+            "priority_blueprint": priority_blueprint,
             "resolved_dependencies": dependencies,
-            "formatted_dependencies_context": "\n\n".join(formatted_deps) if formatted_deps else "No internal dependencies needed."
+            "formatted_dependencies_context": formatted_context_str
         }

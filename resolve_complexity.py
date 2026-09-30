@@ -36,8 +36,8 @@ def main():
     parser.add_argument("--no-tests", action="store_true", help="Verify with 'dotnet build' only, skip 'dotnet test'")
     parser.add_argument("--resume", action="store_true", help="Skip already resolved issues in state file")
     parser.add_argument("--max-retries", type=int, default=3, help="Max self-healing attempts per method (default: 3)")
-    parser.add_argument("--provider", default="auto", choices=["auto", "ollama", "gemini", "qwen-cloud"], help="AI provider agent (default: auto)")
-    parser.add_argument("--model", default=None, help="AI model name (default: auto-detected based on provider)")
+    parser.add_argument("--provider", default="gemini", choices=["gemini"], help="AI provider agent (default: gemini)")
+    parser.add_argument("--model", default=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"), help="AI model name (default: gemini-2.5-flash)")
 
     args = parser.parse_args()
 

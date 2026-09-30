@@ -77,7 +77,18 @@
                   <span class="spinner" style="display: none;"></span>
                 </button>
               </div>
-              <span class="input-hint">Tip: Enter <code>.</code> to scan the current directory.</span>
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0.5rem; flex-wrap: wrap; gap: 0.5rem;">
+                <span class="input-hint">Tip: Enter <code>.</code> to scan the current directory.</span>
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                  <label for="scannerEngineSelect" style="font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">Engine:</label>
+                  <select id="scannerEngineSelect" class="form-select" style="padding: 0.25rem 0.5rem; font-size: 0.85rem; width: auto; background: rgba(10, 13, 20, 0.8); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); color: var(--text-main);">
+                    <option value="auto" selected>Auto (Roslyn if ready, else Regex)</option>
+                    <option value="roslyn">Roslyn (.NET CodeAnalysis AST)</option>
+                    <option value="regex">Regex (Built-in Fast Scanner)</option>
+                  </select>
+                </div>
+              </div>
+              <div id="scannerStatusHint" style="margin-top: 0.35rem; font-size: 0.78rem; color: var(--text-dim); text-align: right;"></div>
             </div>
           </form>
 
@@ -193,16 +204,15 @@
                 <div class="form-group flex-1">
                   <label for="providerSelect">AI Agent</label>
                   <select id="providerSelect" class="form-select">
-                    <option value="ollama" selected>Qwen 3 Coder (Local Ollama)</option>
-                    <option value="gemini">Google Gemini (AI Studio)</option>
-                    <option value="qwen-cloud">Qwen Cloud (DashScope)</option>
-                    <option value="openrouter">OpenRouter</option>
+                    <option value="gemini" selected>Google Gemini (AI Studio)</option>
                   </select>
                 </div>
                 <div class="form-group flex-1">
                   <label for="modelSelect">Model</label>
                   <select id="modelSelect" class="form-select">
-                    <option value="qwen3-coder:latest">qwen3-coder:latest</option>
+                    <option value="gemini-2.5-flash" selected>gemini-2.5-flash</option>
+                    <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+                    <option value="gemini-2.5-pro">gemini-2.5-pro</option>
                   </select>
                 </div>
               </div>
@@ -242,16 +252,15 @@
                 <div class="form-group flex-1">
                   <label for="batchProviderSelect">AI Agent</label>
                   <select id="batchProviderSelect" class="form-select">
-                    <option value="ollama" selected>Qwen 3 Coder (Local Ollama)</option>
-                    <option value="gemini">Google Gemini (AI Studio)</option>
-                    <option value="qwen-cloud">Qwen Cloud (DashScope)</option>
-                    <option value="openrouter">OpenRouter</option>
+                    <option value="gemini" selected>Google Gemini (AI Studio)</option>
                   </select>
                 </div>
                 <div class="form-group flex-1">
                   <label for="batchModelSelect">Model</label>
                   <select id="batchModelSelect" class="form-select">
-                    <option value="qwen3-coder:latest">qwen3-coder:latest</option>
+                    <option value="gemini-2.5-flash" selected>gemini-2.5-flash</option>
+                    <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+                    <option value="gemini-2.5-pro">gemini-2.5-pro</option>
                   </select>
                 </div>
                 <div class="form-group flex-1">

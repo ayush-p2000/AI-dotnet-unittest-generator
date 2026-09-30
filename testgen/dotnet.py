@@ -87,7 +87,19 @@ def ensure_dotnet_env() -> Optional[str]:
         str(Path.home() / ".dotnet"),
         str(Path.home() / ".dotnet" / "tools"),
         dotnet_dir,
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
     ]
+
+    # Auto-detect Node/npm from NVM or standard version managers if present
+    nvm_node_root = Path.home() / ".nvm" / "versions" / "node"
+    if nvm_node_root.is_dir():
+        for ver_dir in sorted(nvm_node_root.glob("v*"), reverse=True):
+            bin_dir = ver_dir / "bin"
+            if bin_dir.is_dir():
+                candidates_to_add.append(str(bin_dir))
+                break
+
     to_add = [p for p in candidates_to_add if p not in paths and Path(p).is_dir()]
 
     if to_add:

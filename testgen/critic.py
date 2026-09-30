@@ -40,7 +40,7 @@ class CriticAgent:
             "test",
             str(self.test_csproj),
             "--filter",
-            f"FullyQualifiedName~{stem}Test",
+            f"FullyQualifiedName~{stem}",
             "--logger",
             "trx;LogFileName=test_results.trx",
             "--collect:XPlat Code Coverage",
@@ -61,9 +61,14 @@ class CriticAgent:
         stdout = proc.stdout
         stderr = proc.stderr
 
+        executed_cmd = " ".join(cmd)
         # If no tests matched the specific filter, retry without filter
-        if "No test matches the given testcase filter" in stdout:
-            self.logger.info(f"Critic: No tests matched filter '{stem}Test', falling back to full suite run...")
+        filter_miss = (
+            "No test matches the given testcase filter" in stdout
+            or "No test matches the given testcase filter" in stderr
+        )
+        if filter_miss:
+            self.logger.info(f"Critic: No tests matched filter '{stem}', falling back to full suite run...")
             cmd_unfiltered = [
                 dotnet_cmd,
                 "test",
@@ -76,6 +81,7 @@ class CriticAgent:
                 "-v",
                 "normal",
             ]
+            executed_cmd = " ".join(cmd_unfiltered)
             proc = subprocess.run(
                 cmd_unfiltered,
                 capture_output=True,
@@ -86,7 +92,8 @@ class CriticAgent:
             stdout = proc.stdout
             stderr = proc.stderr
 
-        combined_output = f"{stdout}\n{stderr}"
+        combined_output = f"{stdout}\n{stderr}".strip()
+        test_counts = self._parse_test_counts(results_dir, combined_output)
 
         # 1. Check for Compilation / Build Errors
         compile_errors = self._parse_compile_errors(combined_output)
@@ -103,9 +110,12 @@ class CriticAgent:
                 "covered_lines": 0,
                 "uncovered_lines": [],
                 "target_met": False,
+                "test_counts": test_counts,
                 "compile_errors": compile_errors,
                 "feedback_message": feedback,
-                "raw_output": stdout,
+                "raw_output": combined_output,
+                "command": executed_cmd,
+                "test_project": str(self.test_csproj),
             }
 
         # 2. Parse Code Coverage from Cobertura XML (Bug 4 fix: parse coverage regardless of test outcome)
@@ -116,9 +126,19 @@ class CriticAgent:
         covered_lines = cov_info["covered_lines"]
 
         # 3. Check for Test Runtime Failures (TRX first for 100% exact stack traces, then console fallback)
-        test_failures = self._parse_trx_failures(results_dir)
-        if not test_failures:
-            test_failures = self._parse_test_failures(combined_output)
+        test_failures = []
+        if test_counts.get("failed", 0) > 0 or proc.returncode != 0:
+            test_failures = self._parse_trx_failures(results_dir)
+            if not test_failures and (test_counts.get("failed", 0) > 0 or proc.returncode != 0):
+                test_failures = self._parse_test_failures(combined_output)
+
+        # Detect any CLR crashes or unhandled exceptions (e.g., GC finalizer crashes, test host aborts)
+        crashes = self._parse_crash_diagnostics(combined_output)
+        if crashes:
+            # Add crash diagnostic to failures if not already captured
+            for crash in crashes:
+                if not any(crash in tf for tf in test_failures):
+                    test_failures.append(crash)
 
         if test_failures or proc.returncode != 0:
             failure_count = len(test_failures)
@@ -156,13 +176,41 @@ class CriticAgent:
                 "total_lines": total_lines,
                 "covered_lines": covered_lines,
                 "target_met": False,
+                "test_counts": test_counts,
                 "test_failures": test_failures,
                 "uncovered_lines": uncovered_lines,
                 "feedback_message": feedback,
-                "raw_output": stdout,
+                "raw_output": combined_output,
+                "command": executed_cmd,
+                "test_project": str(self.test_csproj),
             }
 
-        # 4. Check coverage target
+        # 4. Check if 0 tests ran
+        if test_counts.get("total", 0) == 0:
+            self.logger.warning(f"Critic: 0 tests were executed for {target_file_name}")
+            return {
+                "status": "NO_TESTS",
+                "passed": False,
+                "coverage_pct": 0.0,
+                "total_lines": total_lines,
+                "covered_lines": covered_lines,
+                "uncovered_lines": uncovered_lines,
+                "target_met": False,
+                "test_counts": test_counts,
+                "test_failures": [],
+                "feedback_message": (
+                    f"No tests were discovered or executed for `{target_file_name}`.\n"
+                    "Please ensure:\n"
+                    "1. The test class is public (`public class <Target>Test`).\n"
+                    "2. Test methods are decorated with `[Fact]` or `[Theory]`.\n"
+                    "3. The test class does not throw in its constructor or static initializer."
+                ),
+                "raw_output": combined_output,
+                "command": executed_cmd,
+                "test_project": str(self.test_csproj),
+            }
+
+        # 5. Check coverage target
         target_met = coverage_pct >= self.target_coverage_pct
 
         if not target_met:
@@ -182,9 +230,12 @@ class CriticAgent:
                 "total_lines": total_lines,
                 "covered_lines": covered_lines,
                 "target_met": False,
+                "test_counts": test_counts,
                 "uncovered_lines": uncovered_lines,
                 "feedback_message": feedback,
-                "raw_output": stdout,
+                "raw_output": combined_output,
+                "command": executed_cmd,
+                "test_project": str(self.test_csproj),
             }
 
         # 5. Success - Tests passed and coverage >= 90%
@@ -196,25 +247,97 @@ class CriticAgent:
             "total_lines": total_lines,
             "covered_lines": covered_lines,
             "target_met": True,
+            "test_counts": test_counts,
             "uncovered_lines": uncovered_lines,
             "feedback_message": f"SUCCESS! All tests passed with {coverage_pct:.1f}% code coverage.",
-            "raw_output": stdout,
+            "raw_output": combined_output,
+            "command": executed_cmd,
+            "test_project": str(self.test_csproj),
         }
+
+    def _parse_test_counts(self, results_dir: Path, output: str) -> Dict[str, Any]:
+        """
+        Parses total, passed, failed, and skipped test counts from TRX files
+        or console output.
+        """
+        counts = {"total": 0, "passed": 0, "failed": 0, "skipped": 0, "duration_s": 0.0}
+        trx_files = list(results_dir.glob("**/*.trx"))
+        if trx_files:
+            for trx_file in trx_files:
+                try:
+                    tree = ET.parse(trx_file)
+                    root = tree.getroot()
+                    for elem in root.iter():
+                        if elem.tag.endswith("Counters"):
+                            counts["total"] = int(elem.attrib.get("total", "0"))
+                            counts["passed"] = int(elem.attrib.get("passed", "0"))
+                            counts["failed"] = (
+                                int(elem.attrib.get("failed", "0"))
+                                + int(elem.attrib.get("error", "0"))
+                                + int(elem.attrib.get("timeout", "0"))
+                            )
+                            counts["skipped"] = (
+                                int(elem.attrib.get("notExecuted", "0"))
+                                + int(elem.attrib.get("inconclusive", "0"))
+                            )
+                            break
+                except Exception:
+                    pass
+
+        # Fallback to console parsing if TRX had 0 total
+        if counts["total"] == 0:
+            total_m = re.search(r"Total tests:\s*(\d+)", output, re.IGNORECASE)
+            passed_m = re.search(r"Passed:\s*(\d+)", output, re.IGNORECASE)
+            failed_m = re.search(r"Failed:\s*(\d+)", output, re.IGNORECASE)
+            skipped_m = re.search(r"Skipped:\s*(\d+)", output, re.IGNORECASE)
+
+            if total_m:
+                counts["total"] = int(total_m.group(1))
+            if passed_m:
+                counts["passed"] = int(passed_m.group(1))
+            if failed_m:
+                counts["failed"] = int(failed_m.group(1))
+            if skipped_m:
+                counts["skipped"] = int(skipped_m.group(1))
+
+        # Check duration
+        dur_m = re.search(r"Duration:\s*([\d\.]+)\s*(ms|s|m)", output, re.IGNORECASE)
+        if dur_m:
+            val = float(dur_m.group(1))
+            unit = dur_m.group(2).lower()
+            if unit == "ms":
+                counts["duration_s"] = val / 1000.0
+            elif unit == "m":
+                counts["duration_s"] = val * 60.0
+            else:
+                counts["duration_s"] = val
+
+        return counts
 
     def _parse_compile_errors(self, output: str) -> List[str]:
         errors = []
+        seen = set()
         for line in output.splitlines():
             line_str = line.strip()
+            if not line_str:
+                continue
             # Match standard C# compiler errors (CS*), NuGet errors (NU*),
-            # MSBuild errors (MSB*), and standalone MSBUILD errors
+            # MSBuild errors (MSB*), NETSDK errors, and standalone tool errors
             if (
                 ": error CS" in line_str
                 or ": error NU" in line_str
                 or ": error MSB" in line_str
+                or ": error NETSDK" in line_str
+                or ": error FS" in line_str
+                or ": error IL" in line_str
                 or "MSBUILD : error" in line_str
-                or ": error FS" in line_str  # F# interop projects
+                or "EXEC : error" in line_str
+                or ": fatal error" in line_str
+                or re.search(r":\s*(?:fatal\s+)?error\s+[A-Za-z0-9_-]+:", line_str, re.IGNORECASE)
             ):
-                errors.append(line_str)
+                if line_str not in seen:
+                    seen.add(line_str)
+                    errors.append(line_str)
         return errors
 
     def _parse_trx_failures(self, results_dir: Path) -> List[str]:
@@ -223,7 +346,7 @@ class CriticAgent:
         from Visual Studio Test Results XML (TRX) files.
         """
         failures = []
-        trx_files = list(results_dir.glob("**/*.trx"))
+        trx_files = sorted(results_dir.glob("**/*.trx"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not trx_files:
             return []
 
@@ -232,7 +355,8 @@ class CriticAgent:
                 tree = ET.parse(trx_file)
                 root = tree.getroot()
                 for result in root.iter():
-                    if result.tag.endswith("UnitTestResult") and result.attrib.get("outcome") == "Failed":
+                    outcome = result.attrib.get("outcome", "")
+                    if result.tag.endswith("UnitTestResult") and outcome in ("Failed", "Error", "Timeout", "Aborted"):
                         test_name = result.attrib.get("testName", "Unknown Test")
                         error_msg = ""
                         stack_trace = ""
@@ -246,6 +370,18 @@ class CriticAgent:
                         failure_parts = [f"Failed Test: `{test_name}`"]
                         if error_msg:
                             failure_parts.append(f"  Error Message:\n    {error_msg}")
+                            # Actionable diagnostic fix suggestions
+                            if "ElectronExecutable" in error_msg or "TypeInitializationException" in error_msg:
+                                failure_parts.append("  [FIX ADVICE] Electron.NET runtime initialization failed. Add a static constructor to your test class to initialize ElectronTestAssembly:\n"
+                                                     "    static <TestClass>() { AppDomain.CurrentDomain.SetData(\"ElectronTestAssembly\", typeof(<TargetClass>).Assembly); }")
+                            elif "Extension methods" in error_msg and "may not be used in setup" in error_msg:
+                                failure_parts.append("  [FIX ADVICE] Moq cannot mock static C# extension methods! Check the interface definition in Context and mock the underlying declared interface method instead.")
+                            elif "Expected result.Success to be False, but found True" in error_msg or "no exception was thrown" in error_msg:
+                                failure_parts.append("  [FIX ADVICE] The method fell through to default success. Verify that your Moq setup matches the EXACT parameter count and overload called by the source class.")
+                            elif "MockBehavior.Strict" in error_msg or "All invocations on the mock must have a corresponding setup" in error_msg:
+                                failure_parts.append("  [FIX ADVICE] Strict mock invoked without setup. Either use default Loose behavior (`new Mock<T>()`) or configure setups for all called members.")
+                            elif "NullReferenceException" in error_msg:
+                                failure_parts.append("  [FIX ADVICE] NullReferenceException encountered. Verify all constructor dependencies, service mocks (.Object), and required DTO properties are initialized.")
                         if stack_trace:
                             failure_parts.append(f"  Stack Trace:\n    {stack_trace}")
 
@@ -266,8 +402,12 @@ class CriticAgent:
 
         for line in output.splitlines():
             stripped = line.strip()
-            # Detect start of a failed test in VSTest / xUnit
-            if stripped.startswith("Failed ") or (stripped.startswith("Failed:") and not stripped.startswith("Failed: 0")):
+            # Detect start of a failed test in VSTest / xUnit (excluding MSBuild messages like 'Failed to load')
+            if (
+                (stripped.startswith("Failed ") and not stripped.startswith("Failed to "))
+                or (stripped.startswith("Failed:") and not stripped.startswith("Failed: 0"))
+                or "[FAIL]" in stripped
+            ):
                 if current_failure:
                     failures.append("\n".join(current_failure))
                     current_failure = []
@@ -291,6 +431,66 @@ class CriticAgent:
             failures.append("\n".join(current_failure))
 
         return failures
+
+    def _parse_crash_diagnostics(self, output: str) -> List[str]:
+        """
+        Detects and parses test host process crashes, fatal errors, and unhandled exceptions
+        (e.g., exceptions thrown on finalizer threads, StackOverflowException, etc.).
+        """
+        crashes = []
+        lines = output.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # Look for crash signatures
+            if (
+                line.startswith("Unhandled exception")
+                or "Test host process crashed" in line
+                or "The active test run was aborted" in line
+                or line.startswith("Fatal error")
+                or line.startswith("Process terminated")
+            ):
+                crash_lines = [line]
+                i += 1
+                while i < len(lines):
+                    next_line = lines[i].strip()
+                    if not next_line:
+                        # Allow single blank line in stack trace if followed by stack frame
+                        if i + 1 < len(lines) and lines[i + 1].strip().startswith("at "):
+                            i += 1
+                            continue
+                        else:
+                            break
+                    # Keep collecting stack trace lines
+                    if (
+                        next_line.startswith("at ")
+                        or next_line.startswith("---")
+                        or "Reason:" in next_line
+                        or "exception" in next_line.lower()
+                        or "Test Run Aborted" in next_line
+                    ):
+                        crash_lines.append(next_line)
+                        i += 1
+                    else:
+                        break
+                crash_text = "\n".join(crash_lines)
+
+                # Check for GC finalizer crash
+                if "GC.RunFinalizers" in crash_text or "Component.Finalize" in crash_text or "Finalize()" in crash_text:
+                    crash_text += (
+                        "\n\n[CRITICAL FIX ADVICE - CLR TEST HOST CRASH]:\n"
+                        "The test host crashed because an unhandled exception was thrown on the CLR Finalizer thread\n"
+                        "during garbage collection (System.GC.RunFinalizers / Component.Finalize).\n"
+                        "In .NET, any unhandled exception in a finalizer immediately terminates the entire test process.\n"
+                        "- Do NOT throw exceptions inside Dispose(bool disposing) when disposing == false.\n"
+                        "- If mocking or subclassing IDisposable or Component (e.g. Process) to simulate a failure,\n"
+                        "  only throw if (disposing) is true, AND call `GC.SuppressFinalize(this)` in the constructor\n"
+                        "  so the garbage collector never runs the finalizer."
+                    )
+                crashes.append(crash_text)
+            else:
+                i += 1
+        return crashes
 
     def _extract_build_error_summary(self, output: str) -> List[str]:
         """
@@ -327,7 +527,9 @@ class CriticAgent:
                 "does not exist", "is inaccessible", "no overload",
                 "cannot convert", "does not contain", "are you missing",
                 "the type or namespace", "ambiguous reference",
-                "failed to restore",
+                "failed to restore", "unhandled exception",
+                "active test run was aborted", "test host process crashed",
+                "runfinalizers",
             ]):
                 error_lines.append(stripped)
         # Deduplicate while preserving order
@@ -341,10 +543,11 @@ class CriticAgent:
 
     def _parse_coverage(self, results_dir: Path, target_file_name: str) -> Dict[str, Any]:
         """
-        Bug 12 fix: Tightens class matching to exact filename or exact class name
-        to avoid false positive substring matches (e.g. Service.cs matching BookingsService).
+        Parses Cobertura XML coverage results for the target file.
+        Deduplicates lines across nested classes, closures, and async state machines
+        to ensure 100% mathematically exact coverage numbers.
         """
-        cobertura_files = list(results_dir.glob("**/coverage.cobertura.xml"))
+        cobertura_files = sorted(results_dir.glob("**/coverage.cobertura.xml"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not cobertura_files:
             return {
                 "coverage_pct": 0.0,
@@ -360,16 +563,14 @@ class CriticAgent:
             target_base = Path(target_file_name).stem.lower()
             target_exact_filename = Path(target_file_name).name.lower()
 
-            uncovered_lines: List[int] = []
-            total_lines = 0
-            covered_lines = 0
+            line_hits: Dict[int, int] = {}
 
             # Search for classes matching the target file
             for cls in root.findall(".//class"):
                 filename = cls.get("filename", "").replace("\\", "/").lower()
                 cls_name = cls.get("name", "").lower()
 
-                # Exact filename match or exact class name match
+                # Exact filename match or exact class name match (including async/nested classes)
                 filename_matches = (
                     filename.endswith(f"/{target_exact_filename}")
                     or filename == target_exact_filename
@@ -378,19 +579,23 @@ class CriticAgent:
                 cls_matches = (
                     cls_name == target_base
                     or cls_name.endswith(f".{target_base}")
+                    or f".{target_base}/" in cls_name
+                    or f".{target_base}+" in cls_name
+                    or f".{target_base}`" in cls_name
                 )
 
                 if filename_matches or cls_matches:
                     for line_elem in cls.findall(".//line"):
-                        total_lines += 1
-                        hits = int(line_elem.get("hits", "0"))
                         line_num = int(line_elem.get("number", "0"))
-                        if hits > 0:
-                            covered_lines += 1
-                        else:
-                            uncovered_lines.append(line_num)
+                        hits = int(line_elem.get("hits", "0"))
+                        if line_num > 0:
+                            # Aggregate maximum hits for this line across all methods/state machines
+                            line_hits[line_num] = max(line_hits.get(line_num, 0), hits)
 
-            if total_lines > 0:
+            if line_hits:
+                total_lines = len(line_hits)
+                covered_lines = sum(1 for hits in line_hits.values() if hits > 0)
+                uncovered_lines = sorted(l_num for l_num, hits in line_hits.items() if hits == 0)
                 pct = (covered_lines / total_lines) * 100.0
                 return {
                     "coverage_pct": pct,

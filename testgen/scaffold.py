@@ -33,41 +33,123 @@ def run(cmd: List[str], cwd: Optional[Path] = None) -> subprocess.CompletedProce
     return result
 
 
+def _resolve_msbuild_property(prop_name: str, start_file: Path, depth: int = 0) -> str:
+    """
+    Recursively resolves an MSBuild property $(PropertyName) by checking:
+    1. Direct imports (<Import Project="..." />) within start_file
+    2. Directory hierarchy for Directory.Build.props, common.props, Directory.Build.targets
+    """
+    if depth > 5:
+        return ""
+    cand_files = []
+
+    # 1. Imports inside start_file
+    try:
+        text = start_file.read_text(encoding="utf-8-sig", errors="ignore")
+        for imp in re.findall(r"<Import\s+Project=[\"\x27]([^\"\x27]+)[\"\x27]", text, re.IGNORECASE):
+            imp_path = (start_file.parent / imp).resolve()
+            if imp_path.is_file() and imp_path not in cand_files:
+                cand_files.append(imp_path)
+    except Exception:
+        pass
+
+    # 2. Directory tree up to filesystem root
+    cur = start_file.parent
+    while cur != cur.parent:
+        for name in ["Directory.Build.props", "common.props", "Directory.Build.targets"]:
+            p = cur / name
+            if p.is_file() and p not in cand_files:
+                cand_files.append(p)
+        cur = cur.parent
+
+    pattern = rf"<{re.escape(prop_name)}(?:\s+[^>]*)?>([^<]+)</{re.escape(prop_name)}>"
+    for f in cand_files:
+        try:
+            content = f.read_text(encoding="utf-8-sig", errors="ignore")
+            m = re.search(pattern, content, re.IGNORECASE)
+            if m:
+                val = m.group(1).strip()
+                if "$(" in val:
+                    sub_m = re.search(r"\$\(([^)]+)\)", val)
+                    if sub_m:
+                        sub_val = _resolve_msbuild_property(sub_m.group(1), f, depth + 1)
+                        if sub_val:
+                            return sub_val
+                return val
+        except Exception:
+            pass
+    return ""
+
+
 def detect_target_framework(csproj_path: Path) -> str:
-    """Detects target framework, handling <TargetFramework>, <TargetFrameworks>, and Directory.Build.props."""
+    """
+    Detects target framework, handling <TargetFramework>, <TargetFrameworks>,
+    MSBuild property variables (e.g. $(ElectronNetTargetFrameworks)), and Directory.Build.props.
+    Guarantees a concrete, valid TFM string like 'net10.0' or 'net8.0'.
+    """
     text = csproj_path.read_text(encoding="utf-8-sig", errors="ignore")
+    raw_candidates = []
+
     m = TFM_RE.search(text)
     if m:
-        return m.group(1).strip()
+        val = m.group(1).strip()
+        if "$(" in val:
+            sub = re.search(r"\$\(([^)]+)\)", val)
+            if sub:
+                resolved = _resolve_msbuild_property(sub.group(1), csproj_path)
+                if resolved:
+                    raw_candidates.append(resolved)
+        else:
+            raw_candidates.append(val)
 
     m_multi = TFMS_RE.search(text)
     if m_multi:
-        tfms = [t.strip() for t in m_multi.group(1).split(";") if t.strip()]
-        # Prefer net8.0 if present, else highest net* target, else first
-        for tfm in ["net8.0", "net9.0", "net7.0", "net6.0"]:
-            if tfm in tfms:
-                return tfm
-        for tfm in tfms:
-            if tfm.startswith("net") and "." in tfm:
-                return tfm
-        return tfms[0] if tfms else "net8.0"
+        val = m_multi.group(1).strip()
+        if "$(" in val:
+            sub = re.search(r"\$\(([^)]+)\)", val)
+            if sub:
+                resolved = _resolve_msbuild_property(sub.group(1), csproj_path)
+                if resolved:
+                    raw_candidates.append(resolved)
+        else:
+            raw_candidates.append(val)
 
     # Walk up parent directories to check Directory.Build.props
-    current = csproj_path.parent
-    while current != current.parent:
-        props = current / "Directory.Build.props"
-        if props.exists():
-            props_text = props.read_text(encoding="utf-8-sig", errors="ignore")
-            m_props = TFM_RE.search(props_text)
-            if m_props:
-                return m_props.group(1).strip()
-        current = current.parent
+    cur = csproj_path.parent
+    while cur != cur.parent:
+        props = cur / "Directory.Build.props"
+        if props.is_file():
+            try:
+                p_text = props.read_text(encoding="utf-8-sig", errors="ignore")
+                m_p = TFM_RE.search(p_text)
+                if m_p:
+                    raw_candidates.append(m_p.group(1).strip())
+                m_pm = TFMS_RE.search(p_text)
+                if m_pm:
+                    raw_candidates.append(m_pm.group(1).strip())
+            except Exception:
+                pass
+        cur = cur.parent
+
+    for cand in raw_candidates:
+        tokens = [t.strip() for t in cand.split(";") if t.strip() and not t.strip().startswith("$")]
+        for pref in ["net10.0", "net9.0", "net8.0", "net7.0", "net6.0"]:
+            if pref in tokens:
+                return pref
+        for t in sorted(tokens, reverse=True):
+            if t.startswith("net") and "." in t:
+                return t
+        if tokens and tokens[0].startswith("net"):
+            return tokens[0]
 
     return "net8.0"
 
 
 def set_target_framework(csproj_path: Path, tfm: str) -> None:
-    # Bug 13 fix: Detect BOM and preserve encoding
+    # Ensure tfm is concrete and not empty or a variable
+    if not tfm or "$" in tfm or ";" in tfm:
+        tfm = "net8.0"
+
     raw_bytes = csproj_path.read_bytes()
     has_bom = raw_bytes.startswith(b"\xef\xbb\xbf")
     encoding = "utf-8-sig" if has_bom else "utf-8"
@@ -201,6 +283,7 @@ def ensure_test_project_isolation(test_csproj: Path, tests_dir: Path) -> None:
     if "RunAnalyzersDuringBuild" not in text:
         isolation_xml = (
             "\n  <PropertyGroup>\n"
+            "    <RollForward>Major</RollForward>\n"
             "    <RunAnalyzersDuringBuild>false</RunAnalyzersDuringBuild>\n"
             "    <EnableNETAnalyzers>false</EnableNETAnalyzers>\n"
             "    <AnalysisMode>None</AnalysisMode>\n"
@@ -239,6 +322,26 @@ def ensure_aspnetcore_reference_if_needed(main_csproj: Path, test_csproj: Path) 
             new_text = test_text.replace("</Project>", f"{framework_ref}</Project>")
             test_csproj.write_text(new_text, encoding="utf-8")
             logger.info(f"Added Microsoft.AspNetCore.App framework reference to {test_csproj.name}")
+
+def ensure_electronnet_metadata_if_needed(main_csproj: Path, test_csproj: Path) -> None:
+    """Ensures test project has ElectronExecutable AssemblyMetadata if testing Electron.NET apps."""
+    logger = get_logger()
+    main_text = main_csproj.read_text(encoding="utf-8-sig", errors="ignore")
+    test_text = test_csproj.read_text(encoding="utf-8-sig", errors="ignore")
+
+    if "ElectronNET" in main_text and "ElectronExecutable" not in test_text:
+        electron_metadata = (
+            "\n  <ItemGroup>\n"
+            "    <AssemblyAttribute Include=\"System.Reflection.AssemblyMetadata\">\n"
+            "      <_Parameter1>ElectronExecutable</_Parameter1>\n"
+            "      <_Parameter2>electron</_Parameter2>\n"
+            "    </AssemblyAttribute>\n"
+            "  </ItemGroup>\n"
+        )
+        if "</Project>" in test_text:
+            new_text = test_text.replace("</Project>", f"{electron_metadata}</Project>")
+            test_csproj.write_text(new_text, encoding="utf-8")
+            logger.info(f"Added ElectronExecutable AssemblyMetadata to {test_csproj.name}")
 
 
 def ensure_referenced_projects_linked(main_csproj: Path, test_csproj: Path) -> None:
@@ -314,6 +417,8 @@ def scaffold_test_project(
             logger.info(f"Removed boilerplate {default_test_file.name}")
     else:
         logger.info(f"Test project already exists at {test_csproj}")
+        # Repair/update target framework if missing or invalid
+        set_target_framework(test_csproj, tfm)
         default_test_file = tests_dir / "UnitTest1.cs"
         if default_test_file.exists():
             default_test_file.unlink()
@@ -323,6 +428,7 @@ def scaffold_test_project(
 
     # 3. Universal references for multi-project solutions & ASP.NET Core
     ensure_aspnetcore_reference_if_needed(main_csproj, test_csproj)
+    ensure_electronnet_metadata_if_needed(main_csproj, test_csproj)
     ensure_referenced_projects_linked(main_csproj, test_csproj)
 
     # 4. Add core unit testing & mocking packages

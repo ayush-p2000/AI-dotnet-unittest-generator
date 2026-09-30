@@ -12,6 +12,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+import os
 
 try:
     from testgen.agent_loop import TestGenLoop
@@ -58,8 +59,8 @@ def main():
     parser.add_argument("target_file", help="Name or relative path of the C# file to generate tests for")
     parser.add_argument("--manifest", default="scan_output.json", help="Path to the scan manifest JSON (default: scan_output.json)")
     parser.add_argument("--project", default=None, help="Project name when manifest has multiple projects")
-    parser.add_argument("--provider", default="auto", choices=["auto", "ollama", "gemini", "qwen-cloud"], help="AI provider agent (default: auto)")
-    parser.add_argument("--model", default=None, help="Model name (default: auto-detected based on provider)")
+    parser.add_argument("--provider", default="gemini", choices=["gemini"], help="AI provider agent (default: gemini)")
+    parser.add_argument("--model", default=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"), help="Model name (default: gemini-2.5-flash)")
     parser.add_argument("--coverage", type=float, default=90.0, help="Target coverage %% (default: 90)")
     parser.add_argument("--retries", type=int, default=4, help="Max author/critic iterations (default: 4)")
     args = parser.parse_args()

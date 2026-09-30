@@ -23,6 +23,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const existingScanCard = document.getElementById("existingScanCard");
   const btnLoadExistingScan = document.getElementById("btnLoadExistingScan");
   const scanResultsContainer = document.getElementById("scanResultsContainer");
+  const scannerEngineSelect = document.getElementById("scannerEngineSelect");
+  const scannerStatusHint = document.getElementById("scannerStatusHint");
   const statProjects = document.getElementById("statProjects");
   const statFiles = document.getElementById("statFiles");
   const statTypes = document.getElementById("statTypes");
@@ -152,7 +154,7 @@ document.addEventListener("DOMContentLoaded", () => {
     selectEl.innerHTML = "";
     if (!providerData || !providerData.providers || !providerData.providers[providerKey]) {
       const opt = document.createElement("option");
-      opt.value = providerKey === "gemini" ? "gemini-3.6-flash" : "qwen3-coder:latest";
+      opt.value = "gemini-2.5-flash";
       opt.textContent = opt.value;
       selectEl.appendChild(opt);
       return;
@@ -212,6 +214,25 @@ document.addEventListener("DOMContentLoaded", () => {
         if (cfg.sonar_project_key) sonarProjectKeyInput.value = cfg.sonar_project_key;
       }
 
+      // Scanner engine status check
+      try {
+        const scRes = await fetch("/api/scanner/status");
+        if (scRes.ok) {
+          const scData = await scRes.json();
+          if (scannerStatusHint) {
+            if (scData.available && scData.compiled) {
+              scannerStatusHint.innerHTML = `<span style="color: #22c55e;">● Roslyn AST Ready</span> (using .NET CodeAnalysis)`;
+            } else if (scData.dotnet_installed) {
+              scannerStatusHint.innerHTML = `<span style="color: #f59e0b;">● Roslyn helper unbuilt</span> &bull; Terminal command: <code>${scData.setup_command}</code>`;
+            } else {
+              scannerStatusHint.innerHTML = `<span style="color: var(--text-dim);">● .NET SDK not detected</span> (Regex scanner active)`;
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("Could not check scanner status", err);
+      }
+
       // 2. Check if a scan already exists
       const scanRes = await fetch("/api/scan-data");
       if (scanRes.ok) {
@@ -234,26 +255,28 @@ document.addEventListener("DOMContentLoaded", () => {
   scanForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const targetPath = projectPathInput.value.trim() || ".";
+    const engine = scannerEngineSelect ? scannerEngineSelect.value : "regex";
     
     // UI state: loading
     btnStartScan.disabled = true;
     btnStartScan.querySelector(".spinner").style.display = "inline-block";
     btnStartScan.querySelector(".btn-text").textContent = "Scanning Solution...";
     openTerminal();
-    logToTerminal(`Starting project scan for: ${targetPath}`, "sys");
+    logToTerminal(`Starting project scan for: ${targetPath} [Engine: ${engine.toUpperCase()}]`, "sys");
 
     try {
       const res = await fetch("/api/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: targetPath }),
+        body: JSON.stringify({ path: targetPath, scanner: engine }),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to scan project.");
 
       currentScanData = data;
-      logToTerminal(`Scan successful! Found ${data.projects.length} project(s).`, "success");
+      const engineTag = data.scanner_engine ? ` (${data.scanner_engine.toUpperCase()})` : "";
+      logToTerminal(`Scan successful${engineTag}! Found ${data.projects.length} project(s).`, "success");
 
       renderScanResults(data);
       showActionChoiceModal(data);
@@ -541,8 +564,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const payload = {
       file_name: targetFile,
       project_name: scaffoldProjectSelect.value || "",
-      provider: providerSelect ? providerSelect.value : "ollama",
-      model: modelSelect ? modelSelect.value : "qwen3-coder:latest",
+      provider: providerSelect ? providerSelect.value : "gemini",
+      model: modelSelect ? modelSelect.value : "gemini-2.5-flash",
       coverage: parseFloat(coverageSlider.value),
       retries: parseInt(retriesInput.value, 10),
     };
@@ -583,8 +606,8 @@ document.addEventListener("DOMContentLoaded", () => {
       force: batchForceCheck.checked,
       coverage: parseFloat(coverageSlider.value),
       retries: parseInt(retriesInput.value, 10),
-      provider: batchProviderSelect ? batchProviderSelect.value : "ollama",
-      model: batchModelSelect ? batchModelSelect.value : "qwen3-coder:latest",
+      provider: batchProviderSelect ? batchProviderSelect.value : "gemini",
+      model: batchModelSelect ? batchModelSelect.value : "gemini-2.5-flash",
     };
 
     btnRunBatchTestGen.disabled = true;

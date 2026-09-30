@@ -26,50 +26,18 @@ def get_gemini_api_keys() -> List[str]:
     return keys
 
 
-def get_qwen_api_keys() -> List[str]:
-    keys = []
-    main_k = os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
-    if main_k and main_k not in keys:
-        keys.append(main_k)
-
-    for k, v in os.environ.items():
-        if (k.startswith("QWEN_API_KEY_") or k.startswith("DASHSCOPE_API_KEY_")) and v and v not in keys:
-            keys.append(v)
-
-    if not keys:
-        raise ValueError("No QWEN_API_KEY or DASHSCOPE_API_KEY found in environment or .env")
-    return keys
-
-
 def resolve_provider(provider: Optional[str] = None, model_name: Optional[str] = None) -> str:
-    if provider and provider.lower() not in ["auto", ""]:
-        return provider.lower()
-
-    if model_name:
-        m = model_name.lower()
-        if m.startswith("gemini"):
-            return "gemini"
-        if m.startswith("qwen") or "coder" in m:
-            if os.environ.get("AI_PROVIDER") == "qwen-cloud":
-                return "qwen-cloud"
-            return "ollama"
-
-    return os.environ.get("AI_PROVIDER", "ollama").lower()
+    return "gemini"
 
 
-def extract_csharp_code(text: str) -> str:
-    """Extracts C# code from markdown fences or raw response."""
-    match = re.search(r"```(?:csharp|cs)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
+from testgen.author import extract_csharp_code
 
 
 class RefactorAgent:
     """
     Generative Agent specialized in resolving SonarQube Cognitive Complexity (S3776).
     Decomposes monolithic methods into clean guard clauses, pattern matching, and private helper methods.
-    Supports Multi-Provider: Local Ollama (Qwen 3 Coder), Google Gemini, and Qwen Cloud.
+    Powered exclusively by Google Gemini with multi-key rotation.
     """
 
     SYSTEM_PROMPT = """You are a Principal .NET 8 / C# Software Architect and Clean Code Refactoring Specialist.
@@ -95,25 +63,11 @@ Your task is to refactor a C# method to resolve a SonarQube Cognitive Complexity
         model_name: Optional[str] = None,
         provider: Optional[str] = None,
     ):
-        self.provider = resolve_provider(provider=provider, model_name=model_name)
-
-        if self.provider == "ollama":
-            self.base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-            self.model_name = model_name or os.environ.get("OLLAMA_MODEL", "qwen3-coder:latest")
-            api_key = os.environ.get("OLLAMA_API_KEY", "ollama")
-            self.clients = [OpenAI(base_url=self.base_url, api_key=api_key)]
-        elif self.provider == "qwen-cloud":
-            self.base_url = os.environ.get("QWEN_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
-            self.model_name = model_name or "qwen3-coder-plus"
-            self.api_keys = get_qwen_api_keys()
-            self.clients = [OpenAI(base_url=self.base_url, api_key=k) for k in self.api_keys]
-        else:
-            self.provider = "gemini"
-            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-            self.model_name = model_name or "gemini-3.6-flash"
-            self.api_keys = get_gemini_api_keys()
-            self.clients = [OpenAI(base_url=self.base_url, api_key=k) for k in self.api_keys]
-
+        self.provider = "gemini"
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        self.model_name = model_name or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        self.api_keys = get_gemini_api_keys()
+        self.clients = [OpenAI(base_url=self.base_url, api_key=k) for k in self.api_keys]
         self.current_client_idx = 0
 
     def _rotate_client(self) -> OpenAI:

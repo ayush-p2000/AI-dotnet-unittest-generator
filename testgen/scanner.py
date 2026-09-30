@@ -1,8 +1,12 @@
+import json
 import re
+import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from testgen.dotnet import find_dotnet, get_dotnet_cmd
 from testgen.logger import get_logger
 
 EXCLUDE_DIRS = {
@@ -509,13 +513,15 @@ def build_symbol_table(projects: List[Dict[str, Any]]) -> Dict[str, Any]:
     return symbols
 
 
-def scan_project(root: str) -> Dict[str, Any]:
+def scan_project_regex(root: str) -> Dict[str, Any]:
+    """Scan a C# solution or project directory using regex-based AST parsing."""
     logger = get_logger()
     root_path = Path(root).resolve()
     csproj_files = find_csproj_files(root_path)
 
     manifest: Dict[str, Any] = {
         "root": str(root_path),
+        "scanner_engine": "regex",
         "projects": [],
         "symbol_table": {}
     }
@@ -539,3 +545,179 @@ def scan_project(root: str) -> Dict[str, Any]:
 
     manifest["symbol_table"] = build_symbol_table(manifest["projects"])
     return manifest
+
+
+def get_roslyn_status() -> Dict[str, Any]:
+    """Check whether the Roslyn scanner helper is installed, compiled, and ready."""
+    dotnet_bin = find_dotnet()
+    roslyn_dir = Path(__file__).resolve().parent.parent / "tools" / "RoslynScanner"
+    csproj_path = roslyn_dir / "RoslynScanner.csproj"
+    dll_path = roslyn_dir / "bin" / "Release" / "net8.0" / "RoslynScanner.dll"
+
+    setup_cmd = f"dotnet build tools/RoslynScanner/RoslynScanner.csproj -c Release"
+
+    has_dotnet = bool(dotnet_bin)
+    has_csproj = csproj_path.exists()
+    is_compiled = dll_path.exists()
+    is_available = has_dotnet and (is_compiled or has_csproj)
+
+    if not has_dotnet:
+        msg = ".NET SDK ('dotnet') not found in PATH or standard directories."
+    elif is_compiled:
+        msg = "Roslyn scanner binary is built and ready."
+    elif has_csproj:
+        msg = "RoslynScanner source project is present and can be built."
+    else:
+        msg = f"RoslynScanner project file missing at: {csproj_path}"
+
+    return {
+        "available": is_available,
+        "compiled": is_compiled,
+        "has_csproj": has_csproj,
+        "dotnet_installed": has_dotnet,
+        "dotnet_path": dotnet_bin,
+        "setup_command": setup_cmd,
+        "message": msg
+    }
+
+
+def scan_project_roslyn(root: str) -> Dict[str, Any]:
+    """Scan a C# solution or project directory using the Roslyn (.NET CodeAnalysis) helper."""
+    logger = get_logger()
+    root_path = Path(root).resolve()
+
+    dotnet_bin = find_dotnet()
+    if not dotnet_bin:
+        raise FileNotFoundError(
+            ".NET SDK ('dotnet') is not installed or not in PATH.\n"
+            "Please install .NET 8+ SDK to use the Roslyn scanner, or use the built-in regex scanner."
+        )
+
+    roslyn_dir = Path(__file__).resolve().parent.parent / "tools" / "RoslynScanner"
+    dll_path = roslyn_dir / "bin" / "Release" / "net8.0" / "RoslynScanner.dll"
+    csproj_path = roslyn_dir / "RoslynScanner.csproj"
+
+    if not csproj_path.exists():
+        raise FileNotFoundError(f"RoslynScanner project not found at: {csproj_path}")
+
+    # 1. Verify Microsoft.CodeAnalysis.CSharp is in packages; if not, install it
+    csproj_text = csproj_path.read_text(encoding="utf-8", errors="ignore")
+    if "Microsoft.CodeAnalysis.CSharp" not in csproj_text:
+        logger.info("Microsoft.CodeAnalysis.CSharp package not found in packages. Installing package via dotnet add...")
+        pkg_res = subprocess.run(
+            [dotnet_bin, "add", str(csproj_path), "package", "Microsoft.CodeAnalysis.CSharp"],
+            capture_output=True,
+            text=True
+        )
+        if pkg_res.returncode != 0:
+            err = pkg_res.stderr or pkg_res.stdout
+            logger.warning(f"Could not install Microsoft.CodeAnalysis.CSharp automatically: {err}")
+
+    # 2. Build the Roslyn helper if not already compiled
+    if not dll_path.exists():
+        logger.info(f"Roslyn binary not found. Building with terminal command: dotnet build {csproj_path} -c Release")
+        build_res = subprocess.run(
+            [dotnet_bin, "build", str(csproj_path), "-c", "Release"],
+            capture_output=True,
+            text=True
+        )
+        if build_res.returncode != 0:
+            err = build_res.stderr or build_res.stdout
+            logger.error(f"Failed to build RoslynScanner helper:\n{err}")
+            raise RuntimeError(
+                f"RoslynScanner build failed. Try running in terminal:\n"
+                f"  dotnet build tools/RoslynScanner/RoslynScanner.csproj -c Release\n\nError: {err}"
+            )
+
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+        tmp_output = Path(tmp.name)
+
+    try:
+        cmd = [dotnet_bin, "exec", "--roll-forward", "Major", str(dll_path), str(root_path), "--output", str(tmp_output)]
+        logger.info(f"Executing Roslyn scanner: {' '.join(cmd)}")
+        run_res = subprocess.run(cmd, capture_output=True, text=True)
+
+        if run_res.returncode != 0:
+            logger.warning(f"dotnet exec returned {run_res.returncode}, attempting dotnet run fallback...")
+            cmd_fallback = [
+                dotnet_bin, "run", "--project", str(csproj_path), "-c", "Release",
+                "--", str(root_path), "--output", str(tmp_output)
+            ]
+            run_res = subprocess.run(cmd_fallback, capture_output=True, text=True)
+            if run_res.returncode != 0:
+                err = run_res.stderr or run_res.stdout
+                logger.error(f"Roslyn scanner execution failed:\n{err}")
+                raise RuntimeError(
+                    f"RoslynScanner execution failed. Try running in terminal:\n"
+                    f"  dotnet run --project tools/RoslynScanner/RoslynScanner.csproj -c Release -- \"{root_path}\"\n\nError: {err}"
+                )
+
+        with open(tmp_output, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        manifest["root"] = str(root_path)
+        manifest["scanner_engine"] = "roslyn"
+        manifest["symbol_table"] = build_symbol_table(manifest.get("projects", []))
+        return manifest
+    finally:
+        if tmp_output.exists():
+            try:
+                tmp_output.unlink()
+            except Exception:
+                pass
+
+
+def scan_project(root: str, engine: str = "auto", fallback_to_regex: bool = True) -> Dict[str, Any]:
+    """Scan a .NET project or solution directory.
+    
+    Args:
+        root: Target project or solution directory path.
+        engine: Scanner engine to use: 'auto' (default), 'roslyn', or 'regex'.
+                - 'auto': Uses Roslyn if available; if not available, displays terminal
+                          command instructions and falls back gracefully to Regex.
+                - 'roslyn': Uses Roslyn. If missing/fails and fallback_to_regex=True,
+                            logs the terminal build command and falls back to Regex.
+                - 'regex': Uses the built-in fast Regex scanner.
+        fallback_to_regex: If True, falls back to Regex when Roslyn is unavailable.
+    """
+    logger = get_logger()
+    engine_normalized = (engine or "auto").strip().lower()
+
+    if engine_normalized == "regex":
+        logger.info(f"Using built-in Regex scanner engine: {root}")
+        return scan_project_regex(root)
+
+    status = get_roslyn_status()
+
+    if engine_normalized == "auto":
+        if status["available"]:
+            logger.info(f"Roslyn scanner detected and available ({status['message']}). Using Roslyn engine: {root}")
+            try:
+                return scan_project_roslyn(root)
+            except Exception as ex:
+                logger.warning(f"Roslyn scan encountered an issue: {ex}")
+                logger.info(f"To compile or run Roslyn scanner manually in terminal, execute:\n  {status['setup_command']}")
+                if fallback_to_regex:
+                    logger.info("Falling back to built-in Regex scanner...")
+                    return scan_project_regex(root)
+                raise
+        else:
+            logger.info(f"Roslyn scanner is not ready ({status['message']}).")
+            logger.info(f"To enable Roslyn scanner, run in terminal:\n  {status['setup_command']}")
+            logger.info("Proceeding with built-in Regex scanner...")
+            return scan_project_regex(root)
+
+    elif engine_normalized == "roslyn":
+        logger.info(f"Initiating project scan using Roslyn (.NET CodeAnalysis) engine: {root}")
+        try:
+            return scan_project_roslyn(root)
+        except Exception as ex:
+            logger.warning(f"Roslyn scanner error: {ex}")
+            logger.info(f"To build or test the Roslyn scanner in terminal, run:\n  {status['setup_command']}")
+            if fallback_to_regex:
+                logger.info("Falling back to built-in Regex scanner...")
+                return scan_project_regex(root)
+            raise
+    else:
+        logger.warning(f"Unknown scanner engine '{engine}', defaulting to Regex.")
+        return scan_project_regex(root)

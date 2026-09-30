@@ -1,5 +1,6 @@
 import http.server
 import json
+import logging
 import os
 import socketserver
 import subprocess
@@ -24,6 +25,7 @@ LOG_BUFFER: List[Dict[str, str]] = []
 LOG_LOCK = threading.Lock()
 JOBS: Dict[str, Dict[str, Any]] = {}
 JOBS_LOCK = threading.Lock()
+GEN_SEMAPHORE = threading.Semaphore(2)  # Bound concurrent generation processes
 
 
 def add_log(msg: str, log_type: str = "info"):
@@ -38,6 +40,36 @@ def pop_logs() -> List[Dict[str, str]]:
         lines = list(LOG_BUFFER)
         LOG_BUFFER.clear()
         return lines
+
+
+class UILoggingHandler(logging.Handler):
+    """Bridges centralized testgen logger output into the UI web terminal drawer."""
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            if not msg.strip():
+                return
+            level = record.levelno
+            if level >= logging.ERROR:
+                log_type = "error"
+            elif level >= logging.WARNING:
+                log_type = "warn"
+            elif any(s in msg for s in ["[SUCCESS]", "[TARGET MET]", "Passed!"]):
+                log_type = "success"
+            elif any(s in msg for s in ["[sys]", "[PROMPT", "[AI RESULT", "[ITERATION"]):
+                log_type = "sys"
+            else:
+                log_type = "info"
+            add_log(msg, log_type)
+        except Exception:
+            pass
+
+
+# Automatically attach UILoggingHandler to testgen logger
+_testgen_logger = logging.getLogger("testgen")
+_ui_handler = UILoggingHandler()
+_ui_handler.setFormatter(logging.Formatter("%(message)s"))
+_testgen_logger.addHandler(_ui_handler)
 
 
 def create_job() -> str:
@@ -73,12 +105,20 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
         # Prevent spamming terminal on every static asset fetch
         pass
 
+    def _get_allowed_origin(self) -> str:
+        origin = self.headers.get("Origin", "")
+        # Allow requests from local dev origins
+        if origin and any(origin.startswith(prefix) for prefix in ("http://localhost", "http://127.0.0.1", "https://localhost", "https://127.0.0.1")):
+            return origin
+        return "http://127.0.0.1:5000"
+
     def _send_json(self, data: Any, status_code: int = 200):
         body = json.dumps(data).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", self._get_allowed_origin())
+        self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(body)
 
@@ -94,9 +134,10 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", self._get_allowed_origin())
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Vary", "Origin")
         self.end_headers()
 
     def do_GET(self):
@@ -109,10 +150,13 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         elif path == "/api/config":
+            raw_token = os.getenv("SONAR_TOKEN", "")
+            masked_token = (raw_token[:3] + "..." + raw_token[-3:]) if len(raw_token) > 6 else ("••••••••" if raw_token else "")
             self._send_json({
                 "project_root": os.getcwd(),
                 "sonar_host": os.getenv("SONAR_HOST_URL", "http://localhost:9000"),
-                "sonar_token": os.getenv("SONAR_TOKEN", ""),
+                "sonar_token": masked_token,
+                "sonar_token_configured": bool(raw_token),
                 "sonar_project_key": os.getenv("SONAR_PROJECT_KEY", ""),
             })
             return
@@ -151,57 +195,29 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
 
         elif path == "/api/providers/models":
             # Detect local Ollama models dynamically
-            ollama_models = []
-            ollama_available = False
-            try:
-                import urllib.request
-                req = urllib.request.Request("http://localhost:11434/api/tags", headers={"User-Agent": "AI-TestGen"})
-                with urllib.request.urlopen(req, timeout=1.5) as resp:
-                    if resp.status == 200:
-                        tags_data = json.loads(resp.read().decode())
-                        ollama_models = [m["name"] for m in tags_data.get("models", [])]
-                        ollama_available = True
-            except Exception:
-                ollama_available = False
-
-            if not ollama_models:
-                ollama_models = ["qwen3-coder:latest", "qwen2.5-coder:latest"]
-
             self._send_json({
-                "default_provider": os.getenv("AI_PROVIDER", "ollama"),
+                "default_provider": "gemini",
                 "providers": {
-                    "ollama": {
-                        "name": "Qwen 3 Coder (Local Ollama)",
-                        "available": ollama_available,
-                        "models": ollama_models,
-                        "default_model": "qwen3-coder:latest"
-                    },
                     "gemini": {
                         "name": "Google Gemini (AI Studio)",
                         "available": bool(os.getenv("GEMINI_API_KEY")),
-                        "models": ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-2.5-pro"],
-                        "default_model": "gemini-3.6-flash"
-                    },
-                    "qwen-cloud": {
-                        "name": "Qwen Cloud (DashScope / Remote)",
-                        "available": bool(os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")),
-                        "models": ["qwen3-coder-plus", "qwen3-coder-next", "qwen2.5-coder-32b-instruct"],
-                        "default_model": "qwen3-coder-plus"
-                    },
-                    "openrouter": {
-                        "name": "OpenRouter",
-                        "available": bool(os.getenv("OPENROUTER_API_KEY")),
-                        "models": [
-                            "nvidia/nemotron-3-ultra-550b-a55b:free",
-                            "qwen/qwen-2.5-coder-32b-instruct",
-                            "deepseek/deepseek-chat",
-                            "anthropic/claude-3.5-sonnet",
-                            "meta-llama/llama-3.3-70b-instruct"
-                        ],
-                        "default_model": os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free")
+                        "models": ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-2.5-pro"],
+                        "default_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
                     }
                 }
             })
+        elif path == "/api/scanner/status":
+            try:
+                from testgen.scanner import get_roslyn_status
+                self._send_json(get_roslyn_status())
+            except Exception as e:
+                self._send_json({
+                    "available": False,
+                    "compiled": False,
+                    "dotnet_installed": False,
+                    "setup_command": "dotnet build tools/RoslynScanner/RoslynScanner.csproj -c Release",
+                    "message": str(e)
+                })
             return
 
         # 2. Static Assets Serving
@@ -243,11 +259,33 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
 
         # 1. Project Scanner
         if path == "/api/scan":
-            target_dir = body.get("path", ".")
-            add_log(f"Running scan on '{target_dir}'...", "sys")
+            raw_path = body.get("path", ".")
             try:
-                from testgen.scanner import scan_project
-                manifest = scan_project(target_dir)
+                resolved_target = Path(raw_path).expanduser().resolve()
+                if not resolved_target.exists():
+                    self._send_error(f"Path does not exist: {raw_path}", 400)
+                    return
+                if not resolved_target.is_dir():
+                    self._send_error(f"Path is not a directory: {raw_path}", 400)
+                    return
+            except Exception as e:
+                self._send_error(f"Invalid path parameter: {e}", 400)
+                return
+
+            target_dir = str(resolved_target)
+            scanner_engine = body.get("scanner") or body.get("engine", "auto")
+            add_log(f"Running scan on '{target_dir}' [Requested: {scanner_engine.upper()}]...", "sys")
+            try:
+                from testgen.scanner import scan_project, get_roslyn_status
+                manifest = scan_project(target_dir, engine=scanner_engine, fallback_to_regex=True)
+                actual_engine = manifest.get("scanner_engine", scanner_engine)
+
+                if scanner_engine in ("auto", "roslyn") and actual_engine == "regex":
+                    status = get_roslyn_status()
+                    add_log(f"Notice: Using built-in Regex scanner ({status.get('message', 'Roslyn unavailable')}).", "warn")
+                    add_log(f"To enable Roslyn scanner, run in terminal: {status.get('setup_command')}", "info")
+                else:
+                    add_log(f"Scanner engine used: {actual_engine.upper()}", "sys")
 
                 # Persist scan_output.json
                 out_file = Path("scan_output.json")
@@ -301,10 +339,14 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
 
         # 3. Single File Test Gen
         elif path == "/api/testgen/single":
+            if not GEN_SEMAPHORE.acquire(blocking=False):
+                self._send_error("Maximum concurrent test generation jobs reached. Please wait for the current job to finish.", 429)
+                return
+
             file_name = body.get("file_name")
             req_project_name = body.get("project_name", "")
-            provider = body.get("provider", "ollama")
-            model_name = body.get("model", "qwen3-coder:latest")
+            provider = body.get("provider", "gemini")
+            model_name = body.get("model", os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"))
             target_cov = float(body.get("coverage", 90.0))
             max_retries = int(body.get("retries", 4))
 
@@ -353,6 +395,8 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                 except Exception as ex:
                     add_log(f"Test generation failed: {ex}", "error")
                     finish_job(job_id, {"status": "ERROR", "message": str(ex), "passed": False})
+                finally:
+                    GEN_SEMAPHORE.release()
 
             job_id = create_job()
             t = threading.Thread(target=run_single, daemon=True)
@@ -362,12 +406,16 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
 
         # 4. Batch Test Gen
         elif path == "/api/testgen/batch":
+            if not GEN_SEMAPHORE.acquire(blocking=False):
+                self._send_error("A test generation job is already active. Please wait for it to complete.", 429)
+                return
+
             proj_name = body.get("project_name", "ALL")
             concurrency = int(body.get("concurrency", 1))
             resume = body.get("resume", True)
             force = body.get("force", False)
-            provider = body.get("provider", "ollama")
-            model_name = body.get("model", "qwen3-coder:latest")
+            provider = body.get("provider", "gemini")
+            model_name = body.get("model", os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"))
 
             add_log(f"Launching batch test generation for project: {proj_name} (Agent: {provider}, Model: {model_name})...", "sys")
 
@@ -389,20 +437,23 @@ class StudioHandler(http.server.SimpleHTTPRequestHandler):
                 cmd.append("--force")
 
             def run_batch():
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                )
-                for line in iter(proc.stdout.readline, ""):
-                    if line.strip():
-                        add_log(line.strip(), "info")
-                proc.stdout.close()
-                proc.wait()
-                add_log(f"Batch generation completed with exit code {proc.returncode}.", "success" if proc.returncode == 0 else "warn")
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    for line in iter(proc.stdout.readline, ""):
+                        if line.strip():
+                            add_log(line.strip(), "info")
+                    proc.stdout.close()
+                    proc.wait()
+                    add_log(f"Batch generation completed with exit code {proc.returncode}.", "success" if proc.returncode == 0 else "warn")
+                finally:
+                    GEN_SEMAPHORE.release()
 
             t = threading.Thread(target=run_batch, daemon=True)
             t.start()
